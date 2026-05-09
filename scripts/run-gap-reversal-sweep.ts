@@ -20,6 +20,10 @@ type Phase = {
   env: Record<string, string>;
 };
 
+process.on("SIGHUP", () => {
+  console.log("[gap-reversal-sweep] received SIGHUP; continuing in background");
+});
+
 const PHASES: Phase[] = [
   {
     name: "01-conservative",
@@ -165,12 +169,22 @@ async function runPhase(phase: Phase, runId: string, durationMs: number) {
   console.log(`[gap-reversal-sweep] logs: ${logDir}`);
   console.log(`[gap-reversal-sweep] state: ${stateDir}`);
 
-  const child = Bun.spawn(["bun", ...args], {
-    env,
-    stdout: "inherit",
-    stderr: "inherit",
-    stdin: "inherit",
-  });
+  const child = Bun.spawn(
+    [
+      "sh",
+      "-c",
+      'trap "" HUP; exec "$@"',
+      "gap-reversal-child",
+      "bun",
+      ...args,
+    ],
+    {
+      env,
+      stdout: "inherit",
+      stderr: "inherit",
+      stdin: "ignore",
+    },
+  );
 
   const timer = setTimeout(() => {
     console.log(
