@@ -29,9 +29,31 @@ type OrderMeta = {
   upBid: number | null;
   downAsk: number | null;
   downBid: number | null;
+  signalId?: string;
+  requestId?: string;
+  signalLatencyMs?: number;
+  requestLatencyMs?: number;
+  metrics?: Record<string, unknown>;
+  market?: Record<string, number | null>;
 };
 
 type OrderPoint = { x: number; y: number; meta: OrderMeta };
+
+type StrategySignalMeta = {
+  signalId: string;
+  action: "buy" | "sell";
+  side: "UP" | "DOWN";
+  label?: string;
+  remaining: number;
+  metrics?: Record<string, unknown>;
+  market?: Record<string, number | null>;
+};
+
+type StrategySignalPoint = {
+  x: number;
+  y: number;
+  meta: StrategySignalMeta;
+};
 
 type BtcPoint = {
   remaining: number;
@@ -77,6 +99,10 @@ export type RunChartData = {
   orderData: OrderPoint[];
   orderColors: string[];
   orderShapes: string[];
+  btcOrderData: OrderPoint[];
+  btcOrderColors: string[];
+  btcSignalData: StrategySignalPoint[];
+  btcSignalColors: string[];
   btcLineData: BtcLinePoint[];
   coinbaseLineData: { x: number; y: number }[];
   binanceLineData: { x: number; y: number }[];
@@ -96,6 +122,10 @@ function statusColor(status: string): string {
   if (status === "expired") return "#94a3b8";
   if (status === "failed") return "#ef4444";
   return "#6b7280";
+}
+
+function sideColor(side: "UP" | "DOWN"): string {
+  return side === "UP" ? "#22c55e" : "#ef4444";
 }
 
 export function buildRunChartData(run: ParsedRun): RunChartData {
@@ -133,12 +163,33 @@ export function buildRunChartData(run: ParsedRun): RunChartData {
     .filter((e) => e.type === "order")
     .map((e) => ({
       elapsed: el(e.ts),
+      ts: e.ts,
+      requestId: e.requestId as string | undefined,
+      signalId: e.signalId as string | undefined,
       action: e.action as "buy" | "sell",
       side: e.side as "UP" | "DOWN",
       price: e.price as number,
       shares: e.shares as number,
       status: e.status as string,
       reason: e.reason as string | undefined,
+      label: e.label as string | undefined,
+      signalLatencyMs: e.signalLatencyMs as number | undefined,
+      requestLatencyMs: e.requestLatencyMs as number | undefined,
+      metrics: e.metrics as Record<string, unknown> | undefined,
+      market: e.market as Record<string, number | null> | undefined,
+    }));
+
+  const signals = entries
+    .filter((e) => e.type === "strategy_signal")
+    .map((e) => ({
+      elapsed: el(e.ts),
+      ts: e.ts,
+      signalId: e.signalId as string,
+      action: e.action as "buy" | "sell",
+      side: e.side as "UP" | "DOWN",
+      label: e.label as string | undefined,
+      metrics: e.metrics as Record<string, unknown> | undefined,
+      market: e.market as Record<string, number | null> | undefined,
     }));
 
   const buyFilledUp = orders.filter(
@@ -204,6 +255,12 @@ export function buildRunChartData(run: ParsedRun): RunChartData {
         elapsed: o.elapsed,
         remaining: parseFloat((totalDuration - o.elapsed).toFixed(1)),
         reason: o.reason,
+        signalId: o.signalId,
+        requestId: o.requestId,
+        signalLatencyMs: o.signalLatencyMs,
+        requestLatencyMs: o.requestLatencyMs,
+        metrics: o.metrics,
+        market: o.market,
         upAsk: snap?.upAsk ?? null,
         upBid: snap?.upBid ?? null,
         downAsk: snap?.downAsk ?? null,
@@ -302,6 +359,75 @@ export function buildRunChartData(run: ParsedRun): RunChartData {
         ]
       : [];
 
+  const nearestBtcPoint = (elapsedSec: number): BtcPoint | null => {
+    if (!dedupedBtcPoints.length) return null;
+    const remaining = parseFloat((totalDuration - elapsedSec).toFixed(2));
+    return dedupedBtcPoints.reduce((prev, curr) =>
+      Math.abs(curr.remaining - remaining) <
+      Math.abs(prev.remaining - remaining)
+        ? curr
+        : prev,
+    );
+  };
+
+  const btcOrderData: OrderPoint[] = orders
+    .filter((o) => o.status === "placed" || o.status === "filled")
+    .map((o) => {
+      const marketPrice = o.market?.assetPrice;
+      const nearest = nearestBtcPoint(o.elapsed);
+      const assetPrice =
+        typeof marketPrice === "number"
+          ? marketPrice
+          : nearest?.assetPrice ?? o.price;
+      return {
+        x: parseFloat((totalDuration - o.elapsed).toFixed(2)),
+        y: assetPrice,
+        meta: {
+          label: `${o.status.toUpperCase()} ${o.action.toUpperCase()} ${o.side}`,
+          action: o.action,
+          side: o.side,
+          price: o.price,
+          shares: o.shares,
+          status: o.status,
+          elapsed: o.elapsed,
+          remaining: parseFloat((totalDuration - o.elapsed).toFixed(1)),
+          reason: o.reason,
+          signalId: o.signalId,
+          requestId: o.requestId,
+          signalLatencyMs: o.signalLatencyMs,
+          requestLatencyMs: o.requestLatencyMs,
+          metrics: o.metrics,
+          market: o.market,
+          upAsk: null,
+          upBid: null,
+          downAsk: null,
+          downBid: null,
+        },
+      };
+    });
+
+  const btcSignalData: StrategySignalPoint[] = signals.map((s) => {
+    const marketPrice = s.market?.assetPrice;
+    const nearest = nearestBtcPoint(s.elapsed);
+    const assetPrice =
+      typeof marketPrice === "number"
+        ? marketPrice
+        : nearest?.assetPrice ?? 0;
+    return {
+      x: parseFloat((totalDuration - s.elapsed).toFixed(2)),
+      y: assetPrice,
+      meta: {
+        signalId: s.signalId,
+        action: s.action,
+        side: s.side,
+        label: s.label,
+        remaining: parseFloat((totalDuration - s.elapsed).toFixed(1)),
+        metrics: s.metrics,
+        market: s.market,
+      },
+    };
+  });
+
   return {
     slug,
     assetName,
@@ -320,6 +446,10 @@ export function buildRunChartData(run: ParsedRun): RunChartData {
     orderData,
     orderColors,
     orderShapes,
+    btcOrderData,
+    btcOrderColors: btcOrderData.map((p) => sideColor(p.meta.side)),
+    btcSignalData,
+    btcSignalColors: btcSignalData.map((p) => sideColor(p.meta.side)),
     btcLineData,
     coinbaseLineData,
     binanceLineData,

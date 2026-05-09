@@ -5,6 +5,16 @@ import type { LogColor } from "../log.ts";
 import type { TickerTracker } from "../../tracker/ticker";
 import type { MarketData } from "../../tracker/api-queue.ts";
 
+export type StrategyMetricValue = number | string | boolean | null;
+export type StrategyMetrics = Record<string, StrategyMetricValue>;
+
+export type OrderAnalysis = {
+  signalId?: string;
+  label?: string;
+  metrics?: StrategyMetrics;
+  getMetrics?: () => StrategyMetrics;
+};
+
 export type OrderRequest = {
   req: {
     tokenId: string;
@@ -18,6 +28,7 @@ export type OrderRequest = {
   onFilled?: (filledShares: number) => void;
   onExpired?: () => void;
   onFailed?: (reason: string) => void;
+  analysis?: OrderAnalysis;
 };
 
 /** Context exposed to strategies — subset of lifecycle internals. */
@@ -41,6 +52,17 @@ export type StrategyContext = {
   cancelOrders: (orderIds: string[]) => Promise<CancelOrderResponse>;
   /** Cancel pending sells and re-place at best bid for immediate exit. Bypasses sell block. */
   emergencySells: (orderIds: string[]) => Promise<void>;
+  /**
+   * Record a strategy decision point before an order is actually accepted by
+   * the CLOB. The returned id can be attached to OrderRequest.analysis.signalId
+   * so analysis tools can measure signal-to-placement latency.
+   */
+  recordSignal: (input: {
+    action: "buy" | "sell";
+    side: "UP" | "DOWN";
+    label?: string;
+    metrics?: StrategyMetrics;
+  }) => string;
 
   blockBuys: () => void;
   blockSells: () => void;

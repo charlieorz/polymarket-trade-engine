@@ -1,5 +1,5 @@
 # dependencies (bun install)
-node_modules
+node_modules/
 
 # output
 out
@@ -11,7 +11,7 @@ coverage
 *.lcov
 
 # logs
-logs
+logs/
 _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
@@ -21,6 +21,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.test.local
 .env.production.local
 .env.local
+.env.prod
 
 # caches
 .eslintcache
@@ -28,7 +29,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.tsbuildinfo
 
 # IntelliJ based IDEs
-.idea
+.idea/
 loss/*.html
 
 # Finder (MacOS) folder config
@@ -39,3 +40,6 @@ state/
 test.ts
 
 __tmp_state__
+__pycache__/
+.vscode/
+imgs/

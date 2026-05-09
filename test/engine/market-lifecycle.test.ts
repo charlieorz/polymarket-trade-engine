@@ -79,6 +79,129 @@ describe("Test 1: buy DOWN GTC, sell at 0.63 — positive PnL", () => {
   );
 });
 
+describe("Diagnostics logging", () => {
+  test(
+    "records signal, request, placement, and metric snapshots",
+    async () => {
+      const runner = new FixtureRunner();
+      try {
+        await runner.setup(async (ctx) => {
+          const signalId = ctx.recordSignal({
+            action: "buy",
+            side: "DOWN",
+            label: "diagnostic-test",
+            metrics: { remaining: 300, gapSafety: 42 },
+          });
+          ctx.postOrders([
+            {
+              req: {
+                tokenId: DOWN_TOKEN,
+                action: "buy",
+                price: 0.5,
+                shares: 6,
+              },
+              expireAtMs: SLOT_END_MS,
+              analysis: {
+                signalId,
+                label: "diagnostic-test",
+                metrics: { remaining: 299, gapSafety: 43 },
+              },
+            },
+          ]);
+        });
+
+        await runner.advanceTo(LOG_START_TS + 10_000);
+        expect(runner.lifecycle.orderHistory.length).toBeGreaterThan(0);
+        const entries = runner.structuredLogEntries as Record<string, any>[];
+        const signal = entries.find(
+          (e) => e.type === "strategy_signal" && e.label === "diagnostic-test",
+        );
+        const requested = entries.find(
+          (e) => e.type === "order_requested" && e.label === "diagnostic-test",
+        );
+        const placed = entries.find(
+          (e) =>
+            e.type === "order" &&
+            e.status === "placed" &&
+            e.label === "diagnostic-test",
+        );
+
+        expect(typeof signal?.signalId).toBe("string");
+        expect(typeof requested?.requestId).toBe("string");
+        expect(requested?.signalId).toBe(signal?.signalId);
+        expect(placed?.requestId).toBe(requested?.requestId);
+        expect(placed?.signalLatencyMs).toBeGreaterThanOrEqual(0);
+        expect(placed?.requestLatencyMs).toBeGreaterThanOrEqual(0);
+        expect(placed?.metrics?.gapSafety).toBe(43);
+        expect(typeof placed?.market?.priceToBeat).toBe("number");
+      } finally {
+        try {
+          runner.teardown();
+        } catch {}
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "keeps logging after a completed trade when image diagnostics are enabled",
+    async () => {
+      const runner = new FixtureRunner();
+      let cleanupCalled = false;
+      try {
+        await runner.setup(
+          async (ctx) => {
+            ctx.postOrders([
+              {
+                req: {
+                  tokenId: DOWN_TOKEN,
+                  action: "buy",
+                  price: 0.5,
+                  shares: 6,
+                },
+                expireAtMs: SLOT_END_MS,
+                onFilled: (shares) => {
+                  ctx.postOrders([
+                    {
+                      req: {
+                        tokenId: DOWN_TOKEN,
+                        action: "sell",
+                        price: 0.63,
+                        shares,
+                      },
+                      expireAtMs: SLOT_END_MS,
+                    },
+                  ]);
+                },
+              },
+            ]);
+            return () => {
+              cleanupCalled = true;
+            };
+          },
+          { imageOutput: true },
+        );
+
+        await runner.advanceTo(TS_268S_REMAINING);
+        expect(
+          runner.lifecycle.orderHistory.some((o) => o.action === "sell"),
+        ).toBe(true);
+        expect(runner.lifecycle.state).toBe("RUNNING");
+        expect(cleanupCalled).toBe(true);
+
+        await runner.advanceTo(TS_AFTER_SLOT);
+        await runner.waitForState("DONE", TS_AFTER_SLOT + 30_000);
+        expect(runner.lifecycle.state).toBe("DONE");
+      } finally {
+        try {
+          runner.teardown();
+        } catch {}
+      }
+    },
+    TEST_TIMEOUT,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Test 2: GTC buy UP at 0.51, emergency-sell when bid < 0.40 → negative PnL
 // ---------------------------------------------------------------------------

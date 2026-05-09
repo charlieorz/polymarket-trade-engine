@@ -1,6 +1,6 @@
 // Buy and Hold strategy
 
-import type { Strategy, StrategyContext } from "./types.ts";
+import type { Strategy, StrategyContext, StrategyMetrics } from "./types.ts";
 import { Env } from "../../utils/config.ts";
 
 class RSI {
@@ -285,6 +285,8 @@ function placeEntry(
   ctx: StrategyContext,
   state: LateEntryState,
   signal: EntrySignal,
+  signalId: string,
+  getMetrics: () => StrategyMetrics,
 ): void {
   const tokenId =
     signal.side === "UP" ? ctx.clobTokenIds[0] : ctx.clobTokenIds[1];
@@ -293,6 +295,11 @@ function placeEntry(
     {
       req: { tokenId, action: "buy", price: signal.ask, shares: SHARES },
       expireAtMs: ctx.slotEndMs,
+      analysis: {
+        signalId,
+        label: "late-entry entry",
+        getMetrics,
+      },
       onFilled(filledShares) {
         state.position = {
           side: signal.side,
@@ -330,6 +337,7 @@ function checkStopLoss(
   remaining: number,
   gap: number | null,
   rsi: number | null,
+  getMetrics: () => StrategyMetrics,
 ): void {
   const pos = state.position;
   if (!pos) return;
@@ -370,6 +378,16 @@ function checkStopLoss(
     "red",
   );
 
+  // 这里单独记录止损卖出信号，而不是只依赖最终的 SELL 订单日志。
+  // 这样图片里可以同时看到“策略判断应该卖出”的时刻，以及 CLOB
+  // 真正返回 orderId 的时刻；两者的时间差就是需要排查的下单延迟。
+  const signalId = ctx.recordSignal({
+    action: "sell",
+    side: pos.side,
+    label: "late-entry stop-loss",
+    metrics: getMetrics(),
+  });
+
   ctx.postOrders([
     {
       req: {
@@ -379,6 +397,11 @@ function checkStopLoss(
         shares: pos.shares,
       },
       expireAtMs: ctx.slotEndMs,
+      analysis: {
+        signalId,
+        label: "late-entry stop-loss",
+        getMetrics,
+      },
       onFilled() {
         ctx.log(
           `[${ctx.slug}] late-entry: stop-loss SELL filled @ ${sellPrice}`,
@@ -462,6 +485,22 @@ export const lateEntry: Strategy = async (ctx) => {
 
     indicators.tick(gap, btcPrice);
 
+    const buildMetrics = (
+      extra: StrategyMetrics = {},
+    ): StrategyMetrics => ({
+      remaining,
+      btcPrice: btcPrice ?? null,
+      priceToBeat,
+      gap,
+      rsi: indicators.rsi,
+      atr: indicators.atr,
+      rtv: indicators.rtv,
+      gapSafety: gap !== null ? indicators.gapSafety(gap) : null,
+      divergence: ctx.ticker.divergence,
+      peakGapRatio: gap !== null ? indicators.peakGapRatio(gap) : null,
+      ...extra,
+    });
+
     if (!state.hasEntered) {
       const up = ctx.orderBook.bestAskInfo("UP");
       const down = ctx.orderBook.bestAskInfo("DOWN");
@@ -483,17 +522,59 @@ export const lateEntry: Strategy = async (ctx) => {
 
         if (signal) {
           state.hasEntered = true;
+          // 先记录“策略识别到入场机会”的指标快照，再发起订单请求。
+          // 后续 postOrders 的 analysis.signalId 会把订单确认日志和这个
+          // 信号日志关联起来，用于在诊断图里计算识别到确认之间的延迟。
+          const signalMetrics = buildMetrics({
+            signalSide: signal.side,
+            signalAsk: signal.ask,
+            signalGap: signal.gap,
+            signalLiquidity: signal.liquidity,
+            stopLossPrice: signal.stopLossPrice,
+            upAsk: up?.price ?? null,
+            upAskLiquidity: up?.liquidity ?? null,
+            downAsk: down?.price ?? null,
+            downAskLiquidity: down?.liquidity ?? null,
+          });
+          const signalId = ctx.recordSignal({
+            action: "buy",
+            side: signal.side,
+            label: "late-entry entry",
+            metrics: signalMetrics,
+          });
           ctx.log(
             `[${ctx.slug}] late-entry: signal ${signal.side} @ ${signal.ask} (gap ${signal.gap.toFixed(0)}, liq $${signal.liquidity.toFixed(0)})`,
             "cyan",
           );
-          placeEntry(ctx, state, signal);
+          placeEntry(ctx, state, signal, signalId, () =>
+            buildMetrics({
+              signalSide: signal.side,
+              signalAsk: signal.ask,
+              signalGap: signal.gap,
+              signalLiquidity: signal.liquidity,
+              stopLossPrice: signal.stopLossPrice,
+              upAsk: ctx.orderBook.bestAskInfo("UP")?.price ?? null,
+              downAsk: ctx.orderBook.bestAskInfo("DOWN")?.price ?? null,
+            }),
+          );
         }
       }
     }
 
     if (state.position && !state.stopLossFired) {
-      checkStopLoss(ctx, state, remaining, gap, indicators.rsi);
+      checkStopLoss(ctx, state, remaining, gap, indicators.rsi, () =>
+        buildMetrics({
+          positionSide: state.position?.side ?? null,
+          entryPrice: state.position?.entryPrice ?? null,
+          stopLossPrice: state.position?.stopLossPrice ?? null,
+          bestAsk: state.position
+            ? ctx.orderBook.bestAskInfo(state.position.side)?.price ?? null
+            : null,
+          bestBid: state.position
+            ? ctx.orderBook.bestBidPrice(state.position.side) ?? null
+            : null,
+        }),
+      );
     }
   }, 0);
 };

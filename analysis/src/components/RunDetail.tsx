@@ -33,6 +33,24 @@ const ALL_STATUSES = [
   "failed",
 ] as const;
 
+function fmtMetric(value: unknown): string {
+  if (value == null) return "-";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "-";
+    return Math.abs(value) >= 1000 ? value.toFixed(2) : value.toFixed(4);
+  }
+  return String(value);
+}
+
+function metricSummary(metrics?: Record<string, unknown>): string {
+  if (!metrics) return "";
+  return Object.entries(metrics)
+    .filter(([, value]) => value !== undefined)
+    .slice(0, 8)
+    .map(([key, value]) => `${key}: ${fmtMetric(value)}`)
+    .join("<br>");
+}
+
 export function RunDetail({ runs, slug, onSelect }: Props) {
   const selected = useMemo(
     () => (slug ? (runs.find((r) => r.filename === slug) ?? null) : null),
@@ -157,9 +175,68 @@ function RunDetailChart({
       },
     };
 
+    const assetMarkerPlugin = {
+      id: "asset-markers-" + Math.random(),
+      afterDatasetsDraw(chart: any) {
+        const { ctx } = chart;
+        chart.data.datasets.forEach((dataset: any, datasetIndex: number) => {
+          if (
+            dataset.label !== "Strategy Signals" &&
+            dataset.label !== "Asset Orders"
+          ) {
+            return;
+          }
+          const meta = chart.getDatasetMeta(datasetIndex);
+          meta.data.forEach((point: any, index: number) => {
+            const raw = dataset.data[index];
+            if (!raw?.meta) return;
+            const isOrder = dataset.label === "Asset Orders";
+            const label = isOrder
+              ? raw.meta.action === "buy"
+                ? "B"
+                : "S"
+              : "?";
+            ctx.save();
+            ctx.globalAlpha = isOrder ? 1 : 0.42;
+            ctx.fillStyle = Array.isArray(dataset.backgroundColor)
+              ? dataset.backgroundColor[index]
+              : dataset.backgroundColor;
+            ctx.strokeStyle = isOrder ? "#f8fafc" : "transparent";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            if (isOrder) {
+              const r = 15;
+              const x = point.x;
+              const y = point.y;
+              ctx.moveTo(x, y - r);
+              ctx.lineTo(x + r, y - r / 2);
+              ctx.lineTo(x + r, y + r / 2);
+              ctx.lineTo(x, y + r);
+              ctx.lineTo(x - r, y + r / 2);
+              ctx.lineTo(x - r, y - r / 2);
+              ctx.closePath();
+            } else {
+              ctx.arc(point.x, point.y, 10, 0, Math.PI * 2);
+            }
+            ctx.fill();
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#071018";
+            ctx.font = isOrder
+              ? "800 18px ui-monospace, monospace"
+              : "700 11px ui-monospace, monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(label, point.x, point.y + (isOrder ? 1 : 0));
+            ctx.restore();
+          });
+        });
+      },
+    };
+
     const mainChart = new Chart(mainRef.current, {
       type: "scatter",
-      plugins: [crosshairPlugin],
+      plugins: [crosshairPlugin, assetMarkerPlugin],
       data: {
         datasets: [
           {
@@ -270,16 +347,16 @@ function RunDetailChart({
     const assetName = data.assetName;
     const btcChart = new Chart(btcRef.current, {
       type: "scatter",
-      plugins: [crosshairPlugin],
+      plugins: [crosshairPlugin, assetMarkerPlugin],
       data: {
         datasets: [
           {
             label: `${assetName} Price`,
             data: data.btcLineData as any,
             type: "line",
-            borderColor: "#3b82f6",
+            borderColor: "#f59e0b",
             backgroundColor: "transparent",
-            borderWidth: 2,
+            borderWidth: 3,
             pointRadius: 0,
             pointHoverRadius: 0,
             tension: 0.2,
@@ -289,13 +366,37 @@ function RunDetailChart({
             label: "Price to Beat",
             data: data.ptbLineData as any,
             type: "line",
-            borderColor: "#f97316",
+            borderColor: "#f8fafc",
             backgroundColor: "transparent",
             borderWidth: 1.5,
             borderDash: [6, 4],
             pointRadius: 0,
             pointHoverRadius: 0,
             order: 3,
+          },
+          {
+            label: "Strategy Signals",
+            data: data.btcSignalData as any,
+            backgroundColor: data.btcSignalColors,
+            borderColor: data.btcSignalColors,
+            borderWidth: 0,
+            pointRadius: 10,
+            pointHoverRadius: 12,
+            pointStyle: "circle",
+            clip: false,
+            order: 1,
+          },
+          {
+            label: "Asset Orders",
+            data: data.btcOrderData as any,
+            backgroundColor: data.btcOrderColors,
+            borderColor: "#f8fafc",
+            borderWidth: 2,
+            pointRadius: 14,
+            pointHoverRadius: 16,
+            pointStyle: "circle",
+            clip: false,
+            order: 0,
           },
           ...(data.coinbaseLineData.length
             ? [
@@ -678,33 +779,84 @@ function RunDetailChart({
 
         // ── BTC chart tooltip (asset price + external sources) ──────────────
         {
+          const onBtcCanvas = canvas === btcRef.current;
+          let markerRows = "";
+          let markerAnchor: { x: number; y: number } | null = null;
+          if (onBtcCanvas) {
+            const markerCandidates = [
+              ...data.btcOrderData.map((p) => ({ ...p, kind: "order" })),
+              ...data.btcSignalData.map((p) => ({ ...p, kind: "signal" })),
+            ] as any[];
+            let best: any = null;
+            let bestD2 = 24 * 24;
+            for (const p of markerCandidates) {
+              const dx = btcChart.scales.x.getPixelForValue(p.x) - px;
+              const dy = btcChart.scales.y.getPixelForValue(p.y) - py;
+              const d2 = dx * dx + dy * dy;
+              if (d2 < bestD2) {
+                best = p;
+                bestD2 = d2;
+              }
+            }
+            if (best?.kind === "order") {
+              const m = best.meta;
+              const latency =
+                typeof m.signalLatencyMs === "number"
+                  ? (m.signalLatencyMs / 1000).toFixed(3) + "s"
+                  : "-";
+              markerRows += `<b>${m.label}</b>`;
+              markerRows += `Contract: ${m.price} × ${m.shares ?? "-"}<br>`;
+              markerRows += `<span style="color:#64748b">Signal → placed: ${latency}</span><br>`;
+              const metrics = metricSummary(m.metrics);
+              if (metrics)
+                markerRows += `<span style="color:#94a3b8">${metrics}</span><br>`;
+              markerAnchor = {
+                x: btcChart.scales.x.getPixelForValue(best.x),
+                y: btcChart.scales.y.getPixelForValue(best.y),
+              };
+            } else if (best?.kind === "signal") {
+              const m = best.meta;
+              markerRows += `<b>SIGNAL ${m.action.toUpperCase()} ${m.side}</b>`;
+              if (m.label) markerRows += `${m.label}<br>`;
+              const metrics = metricSummary(m.metrics);
+              if (metrics)
+                markerRows += `<span style="color:#94a3b8">${metrics}</span><br>`;
+              markerAnchor = {
+                x: btcChart.scales.x.getPixelForValue(best.x),
+                y: btcChart.scales.y.getPixelForValue(best.y),
+              };
+            }
+          }
+
           const arr = btcChart.data.datasets[0]?.data;
           const idx = nearestIndexAtX(arr, xVal);
           const m = idx !== -1 ? (arr[idx] as any)?.meta : null;
-          if (!m) {
+          if (!m && !markerRows) {
             btcTooltip.style.display = "none";
           } else {
-            let rows = "";
-            if (m.remaining != null)
+            let rows = markerRows;
+            if (m?.remaining != null)
               rows += `<b>${m.remaining.toFixed(1)}s remaining</b>`;
-            if (m.assetPrice != null)
+            if (m?.assetPrice != null)
               rows += `${data.assetName}: $${m.assetPrice.toLocaleString()}<br>`;
-            if (m.priceToBeat != null)
+            if (m?.priceToBeat != null)
               rows += `<span style="color:#64748b">Price to Beat: $${m.priceToBeat.toLocaleString()}</span><br>`;
-            if (m.coinbasePrice != null)
+            if (m?.coinbasePrice != null)
               rows += `<span style="color:#64748b">Coinbase: $${m.coinbasePrice.toLocaleString()}</span><br>`;
-            if (m.binancePrice != null)
+            if (m?.binancePrice != null)
               rows += `<span style="color:#64748b">Binance: $${m.binancePrice.toLocaleString()}</span><br>`;
-            if (m.okxPrice != null)
+            if (m?.okxPrice != null)
               rows += `<span style="color:#64748b">OKX: $${m.okxPrice.toLocaleString()}</span><br>`;
-            if (m.bybitPrice != null)
+            if (m?.bybitPrice != null)
               rows += `<span style="color:#64748b">ByBit: $${m.bybitPrice.toLocaleString()}</span><br>`;
-            if (m.gap != null)
+            if (m?.gap != null)
               rows += `<span style="color:#64748b">Gap: ${m.gap >= 0 ? "+" : ""}${m.gap.toFixed(2)}</span><br>`;
 
             const pt = arr[idx] as any;
-            const anchorX = btcChart.scales.x.getPixelForValue(pt.x);
-            const anchorY = btcChart.scales.y.getPixelForValue(pt.y);
+            const anchorX =
+              markerAnchor?.x ?? btcChart.scales.x.getPixelForValue(pt?.x);
+            const anchorY =
+              markerAnchor?.y ?? btcChart.scales.y.getPixelForValue(pt?.y);
             const btcRect = btcRef.current!.getBoundingClientRect();
 
             btcTooltip.innerHTML = rows;

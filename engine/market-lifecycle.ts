@@ -7,16 +7,21 @@ import type {
   Strategy,
   StrategyContext,
   OrderRequest,
+  StrategyMetrics,
 } from "./strategy/types.ts";
 import type { CancelOrderResponse } from "../utils/trading.ts";
 import type { WalletTracker } from "./wallet-tracker.ts";
 import type { TickerTracker } from "../tracker/ticker";
 import { slotFromSlug } from "../utils/slot.ts";
 import type { UserChannel } from "./user-channel.ts";
+import { renderTradeWindowImageFromLog } from "./analysis/trade-window-image.ts";
 
 export type LifecycleState = "INIT" | "RUNNING" | "STOPPING" | "DONE";
 
 export type PendingOrder = {
+  requestId?: string;
+  signalId?: string;
+  label?: string;
   orderId: string;
   tokenId: string;
   action: "buy" | "sell";
@@ -24,7 +29,9 @@ export type PendingOrder = {
   price: number;
   shares: number;
   expireAtMs: number;
+  requestedAtMs?: number;
   placedAtMs: number;
+  metrics?: StrategyMetrics;
   onFilled?: (filledShares: number) => void;
   onExpired?: () => void | Promise<void>;
   onFailed?: (reason: string) => void | Promise<void>;
@@ -66,6 +73,18 @@ type MarketLifecycleOptions = {
   alwaysLog?: boolean;
   /** Optional OrderBook override (used in tests to inject SimOrderBook). */
   orderBook?: OrderBook;
+  /** Disable automatic PNG output in deterministic unit-test harnesses. */
+  imageOutput?: boolean;
+  /** Optional hook for tests/tools that need the flushed slot log text. */
+  onSlotLog?: (text: string) => void;
+  /** Optional hook for tests/tools that need each structured log entry. */
+  onLogEntry?: (entry: Record<string, unknown>) => void;
+};
+
+type OrderWorkItem = OrderRequest & {
+  requestId: string;
+  requestedAtMs: number;
+  metrics?: StrategyMetrics;
 };
 
 export class MarketLifecycle {
@@ -85,6 +104,8 @@ export class MarketLifecycle {
   private _pnl = 0;
   private _inFlight = 0;
   private _strategyLocks = 0;
+  private _signalTimes = new Map<string, number>();
+  private _diagnosticLoggingOnly = false;
   private _marketLogger = new Logger();
   private _marketOpenTimer: ReturnType<typeof setTimeout> | null = null;
   private _marketPriceHandle: { cancel: () => void } | null = null;
@@ -99,6 +120,8 @@ export class MarketLifecycle {
   private readonly _tracker: WalletTracker;
   private readonly _ticker: TickerTracker;
   private readonly _alwaysLog: boolean;
+  private readonly _imageOutput: boolean;
+  private readonly _onSlotLog?: (text: string) => void;
 
   constructor(opts: MarketLifecycleOptions) {
     this.slug = opts.slug;
@@ -110,8 +133,11 @@ export class MarketLifecycle {
     this._tracker = opts.tracker;
     this._ticker = opts.ticker;
     this._alwaysLog = opts.alwaysLog ?? false;
+    this._imageOutput = opts.imageOutput ?? true;
+    this._onSlotLog = opts.onSlotLog;
     this._orderBook = opts.orderBook ?? new OrderBook();
     this._userChannel = opts.userChannel;
+    if (opts.onLogEntry) this._marketLogger.setEntryObserver(opts.onLogEntry);
 
     const recovery = opts.recovery;
     if (recovery) {
@@ -214,8 +240,23 @@ export class MarketLifecycle {
   }
 
   destroy(): void {
+    let slotLogText: string | null = null;
     if (this._orderHistory.length > 0 || this._alwaysLog) {
-      this._marketLogger.endSlot(this.slug);
+      slotLogText = this._marketLogger.endSlot(this.slug);
+    }
+    if (slotLogText) this._onSlotLog?.(slotLogText);
+    // 只有真实产生过交易的窗口才自动落 PNG，避免长期运行时为每个空窗口
+    // 写入大量无分析价值的图片；图片内容完全基于刚 flush 的结构化日志生成。
+    if (this._imageOutput && slotLogText && this._orderHistory.length > 0) {
+      try {
+        const outPath = renderTradeWindowImageFromLog(slotLogText, {
+          strategyName: this._strategyName,
+          slug: this.slug,
+        });
+        if (outPath) this._log(`[${this.slug}] analysis image: ${outPath}`, "dim");
+      } catch (e) {
+        this._log(`[${this.slug}] analysis image failed: ${e}`, "red");
+      }
     }
     this._marketLogger.destroy();
     this._marketPriceHandle?.cancel();
@@ -326,6 +367,7 @@ export class MarketLifecycle {
       postOrders: this._postOrders.bind(this),
       cancelOrders: this._cancelOrders.bind(this),
       emergencySells: this._emergencySells.bind(this),
+      recordSignal: (input) => this._recordStrategySignal(input),
       blockBuys: () => {
         this._buyBlocked = true;
       },
@@ -384,8 +426,37 @@ export class MarketLifecycle {
       this._strategyLocks === 0 &&
       !this._hasUnfilledPositions()
     ) {
+      if (this._shouldKeepLoggingForTradeDiagnostics()) {
+        this._enterDiagnosticLoggingOnlyMode();
+        return;
+      }
       this._setState("STOPPING");
     }
+  }
+
+  private _shouldKeepLoggingForTradeDiagnostics(): boolean {
+    // 交易诊断图需要展示完整 5m 市场窗口。过去仓位卖出后 lifecycle 会立刻
+    // STOPPING/destroy，Logger 的 1s 快照也随之停止，PNG 右侧只能用最后一个
+    // price 补平线，看起来像 sell 后价格没有波动。这里在已经产生交易且启用
+    // 图片诊断时继续保持 RUNNING 到市场结束，确保 sell 后仍记录真实 ticker。
+    return (
+      this._imageOutput &&
+      this._orderHistory.length > 0 &&
+      Date.now() < this.slotEndMs
+    );
+  }
+
+  private _enterDiagnosticLoggingOnlyMode(): void {
+    if (this._diagnosticLoggingOnly) return;
+    this._diagnosticLoggingOnly = true;
+    this._buyBlocked = true;
+    this._sellBlocked = true;
+    this._strategyCleanup?.();
+    this._strategyCleanup = null;
+    this._log(
+      `[${this.slug}] trade complete — keeping lifecycle RUNNING for price diagnostics only`,
+      "dim",
+    );
   }
 
   /**
@@ -468,6 +539,58 @@ export class MarketLifecycle {
   // Strategy-facing order APIs
   // ---------------------------------------------------------------------------
 
+  private _recordStrategySignal(input: {
+    action: "buy" | "sell";
+    side: "UP" | "DOWN";
+    label?: string;
+    metrics?: StrategyMetrics;
+  }): string {
+    const signalId = crypto.randomUUID();
+    const ts = Date.now();
+    this._signalTimes.set(signalId, ts);
+    // 策略信号是“算法认为应该交易”的时间点；订单日志里的 placed
+    // 是 CLOB 接受订单的时间点。两者通过 signalId 关联后，就能在图里
+    // 直接看到策略判断和真实下单之间的延迟。
+    this._marketLogger.log({
+      type: "strategy_signal",
+      signalId,
+      action: input.action,
+      side: input.side,
+      label: input.label,
+      metrics: input.metrics,
+      market: this._createMarketContext(input.side),
+    });
+    return signalId;
+  }
+
+  private _readAnalysisMetrics(item: OrderRequest): StrategyMetrics | undefined {
+    return item.analysis?.getMetrics?.() ?? item.analysis?.metrics;
+  }
+
+  private _createMarketContext(side?: "UP" | "DOWN") {
+    const slot = slotFromSlug(this.slug);
+    const result = this.apiQueue.marketResult.get(slot.startTime);
+    const assetPrice = this._ticker.price ?? null;
+    const priceToBeat = result?.openPrice ?? null;
+    const gap =
+      assetPrice !== null && priceToBeat !== null
+        ? parseFloat((assetPrice - priceToBeat).toFixed(2))
+        : null;
+    const bookSide = side ?? "UP";
+    const ask = this._orderBook.bestAskInfo(bookSide);
+    const bid = this._orderBook.bestBidInfo(bookSide);
+    return {
+      remaining: parseFloat(this.remainingSecs.toFixed(2)),
+      assetPrice,
+      priceToBeat,
+      gap,
+      bestAsk: ask?.price ?? null,
+      bestAskLiquidity: ask?.liquidity ?? null,
+      bestBid: bid?.price ?? null,
+      bestBidLiquidity: bid?.liquidity ?? null,
+    };
+  }
+
   /**
    * Fire-and-forget order placement. Returns immediately — do NOT await the
    * result to know if an order was placed. Use `onFilled` to react to a fill
@@ -475,10 +598,37 @@ export class MarketLifecycle {
    * Buys retry up to BUY_MAX_RETRIES times on balance errors; sells retry until slot end.
    */
   private _postOrders(requests: OrderRequest[]): void {
-    const buys = requests.filter(
+    const now = Date.now();
+    const workItems: OrderWorkItem[] = requests.map((item) => ({
+      ...item,
+      requestId: crypto.randomUUID(),
+      requestedAtMs: now,
+      metrics: this._readAnalysisMetrics(item),
+    }));
+
+    // 在进入重试队列前先记录 order_requested。这样即使订单之后因为余额、
+    // block flag 或 CLOB 拒单没有 placed，也能在日志里看到策略确实发起过请求。
+    for (const item of workItems) {
+      const side = this._side(item.req.tokenId);
+      this._marketLogger.log({
+        type: "order_requested",
+        requestId: item.requestId,
+        signalId: item.analysis?.signalId,
+        label: item.analysis?.label,
+        action: item.req.action,
+        side,
+        price: item.req.price,
+        shares: item.req.shares,
+        requestedAtMs: item.requestedAtMs,
+        metrics: item.metrics,
+        market: this._createMarketContext(side),
+      });
+    }
+
+    const buys = workItems.filter(
       (o) => o.req.action === "buy" && !this._buyBlocked,
     );
-    const sells = requests.filter(
+    const sells = workItems.filter(
       (o) => o.req.action === "sell" && !this._sellBlocked,
     );
 
@@ -554,6 +704,22 @@ export class MarketLifecycle {
         let failed = false;
 
         await new Promise<void>((resolve) => {
+          const requestedAtMs = Date.now();
+          const side = this._side(sell.tokenId);
+          const requestId = crypto.randomUUID();
+          this._marketLogger.log({
+            type: "order_requested",
+            requestId,
+            signalId: sell.signalId,
+            label: sell.label,
+            action: "sell",
+            side,
+            price: bestBid,
+            shares: sell.shares,
+            requestedAtMs,
+            metrics: sell.metrics,
+            market: this._createMarketContext(side),
+          });
           this._placeWithRetry([
             {
               req: {
@@ -564,6 +730,14 @@ export class MarketLifecycle {
                 orderType: "GTC" as const,
               },
               expireAtMs: Date.now() + 2000,
+              requestId,
+              requestedAtMs,
+              metrics: sell.metrics,
+              analysis: {
+                signalId: sell.signalId,
+                label: sell.label,
+                metrics: sell.metrics,
+              },
               onFilled: (_filledShares) => {
                 filled = true;
                 resolve();
@@ -627,9 +801,22 @@ export class MarketLifecycle {
       fee,
       tokenId: pending.tokenId,
     });
+    const filledAtMs = Date.now();
+    const signalTs = pending.signalId
+      ? this._signalTimes.get(pending.signalId)
+      : undefined;
     this._removePendingOrder(pending.orderId);
     this._marketLogger.log(
-      this._createOrderEntry(pending, "filled", { shares }),
+      this._createOrderEntry(pending, "filled", {
+        shares,
+        filledAtMs,
+        requestLatencyMs: pending.requestedAtMs
+          ? pending.placedAtMs - pending.requestedAtMs
+          : undefined,
+        signalLatencyMs: signalTs ? pending.placedAtMs - signalTs : undefined,
+        metrics: pending.metrics,
+        market: this._createMarketContext(this._side(pending.tokenId)),
+      }),
     );
     if (pending.onFilled) pending.onFilled(shares);
   }
@@ -639,7 +826,7 @@ export class MarketLifecycle {
    * error (350 ms apart) until the slot ends or all orders are placed.
    */
   private _placeWithRetry(
-    items: Array<OrderRequest>,
+    items: Array<OrderWorkItem>,
     retryDelayMs = 350,
     maxRetries = Infinity,
   ): void {
@@ -742,16 +929,51 @@ export class MarketLifecycle {
               const reason = p?.errorMsg ?? "unknown";
               const side =
                 item.req.tokenId === this._clobTokenIds?.[0] ? "UP" : "DOWN";
+              const failedAtMs = Date.now();
+              const signalTs = item.analysis?.signalId
+                ? this._signalTimes.get(item.analysis.signalId)
+                : undefined;
               this._log(
                 `[${this.slug}] Order placement failed (${item.req.action.toUpperCase()} ${side} @ ${item.req.price}): ${reason}`,
                 "red",
+              );
+              this._marketLogger.log(
+                this._createOrderEntry(
+                  {
+                    ...item.req,
+                    requestId: item.requestId,
+                    signalId: item.analysis?.signalId,
+                    label: item.analysis?.label,
+                    requestedAtMs: item.requestedAtMs,
+                    metrics: item.metrics,
+                  },
+                  "failed",
+                  {
+                    reason,
+                    requestLatencyMs: failedAtMs - item.requestedAtMs,
+                    signalLatencyMs: signalTs ? failedAtMs - signalTs : undefined,
+                    metrics: item.metrics,
+                    market: this._createMarketContext(side),
+                  },
+                ),
               );
               if (item.onFailed) item.onFailed(reason);
             }
             continue;
           }
+          const placedAtMs = Date.now();
+          const side = this._side(item.req.tokenId);
+          const signalTs = item.analysis?.signalId
+            ? this._signalTimes.get(item.analysis.signalId)
+            : undefined;
+          // placedAtMs 是“实际下单时机”的口径：只有 CLOB 返回 orderId
+          // 后才记录。requestLatencyMs 反映本地请求到确认的耗时，
+          // signalLatencyMs 反映策略识别到确认的总耗时。
           this._trackerLock(item, p);
           this._pendingOrders.push({
+            requestId: item.requestId,
+            signalId: item.analysis?.signalId,
+            label: item.analysis?.label,
             orderId: p.orderId,
             tokenId: item.req.tokenId,
             action: item.req.action,
@@ -759,12 +981,34 @@ export class MarketLifecycle {
             price: item.req.price,
             shares: item.req.shares,
             expireAtMs: item.expireAtMs,
-            placedAtMs: Date.now(),
+            requestedAtMs: item.requestedAtMs,
+            placedAtMs,
+            metrics: item.metrics,
             onFilled: item.onFilled,
             onExpired: item.onExpired,
             onFailed: item.onFailed,
           });
-          this._marketLogger.log(this._createOrderEntry(item.req, "placed"));
+          this._marketLogger.log(
+            this._createOrderEntry(
+              {
+                ...item.req,
+                requestId: item.requestId,
+                signalId: item.analysis?.signalId,
+                label: item.analysis?.label,
+                requestedAtMs: item.requestedAtMs,
+                placedAtMs,
+                metrics: item.metrics,
+              },
+              "placed",
+              {
+                placedAtMs,
+                requestLatencyMs: placedAtMs - item.requestedAtMs,
+                signalLatencyMs: signalTs ? placedAtMs - signalTs : undefined,
+                metrics: item.metrics,
+                market: this._createMarketContext(side),
+              },
+            ),
+          );
 
           // Wrap the OrderRequest with fill accounting and register with the user channel.
           // The channel calls wrapped.onFilled when the order is fully settled on-chain.
@@ -796,7 +1040,14 @@ export class MarketLifecycle {
               this._removePendingOrder(orderId);
               this._trackerUnlock(pending);
               this._marketLogger.log(
-                this._createOrderEntry(pending, "failed", { reason }),
+                this._createOrderEntry(pending, "failed", {
+                  reason,
+                  requestLatencyMs: pending.requestedAtMs
+                    ? pending.placedAtMs - pending.requestedAtMs
+                    : undefined,
+                  metrics: pending.metrics,
+                  market: this._createMarketContext(this._side(pending.tokenId)),
+                }),
               );
               item.onFailed?.(reason);
             },
@@ -857,22 +1108,48 @@ export class MarketLifecycle {
 
   private _createOrderEntry(
     order: {
+      requestId?: string;
+      signalId?: string;
+      analysis?: { signalId?: string; label?: string };
+      label?: string;
       action: "buy" | "sell";
       tokenId: string;
       price: number;
       shares: number;
+      requestedAtMs?: number;
+      placedAtMs?: number;
+      metrics?: StrategyMetrics;
     },
     status: "placed" | "filled" | "failed" | "expired" | "canceled",
-    opts?: { shares?: number; reason?: string },
+    opts?: {
+      shares?: number;
+      reason?: string;
+      placedAtMs?: number;
+      filledAtMs?: number;
+      requestLatencyMs?: number;
+      signalLatencyMs?: number;
+      metrics?: StrategyMetrics;
+      market?: Record<string, number | null>;
+    },
   ) {
     return {
       type: "order" as const,
+      requestId: order.requestId,
+      signalId: order.signalId ?? order.analysis?.signalId,
+      label: order.label ?? order.analysis?.label,
       action: order.action,
       side: this._side(order.tokenId),
       price: order.price,
       shares: opts?.shares ?? order.shares,
       status,
       reason: opts?.reason,
+      requestedAtMs: order.requestedAtMs,
+      placedAtMs: opts?.placedAtMs ?? order.placedAtMs,
+      filledAtMs: opts?.filledAtMs,
+      requestLatencyMs: opts?.requestLatencyMs,
+      signalLatencyMs: opts?.signalLatencyMs,
+      metrics: opts?.metrics ?? order.metrics,
+      market: opts?.market,
     };
   }
 

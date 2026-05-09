@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "fs";
 import { join } from "path";
+import type { StrategyMetrics } from "./strategy/types.ts";
 
 type LogEntry =
   | {
@@ -11,6 +12,9 @@ type LogEntry =
     }
   | {
       type: "order";
+      requestId?: string;
+      signalId?: string;
+      label?: string;
       action: "buy" | "sell";
       side: string;
       price: number;
@@ -18,6 +22,35 @@ type LogEntry =
       cost?: number;
       status: "placed" | "filled" | "failed" | "expired" | "canceled";
       reason?: string;
+      requestedAtMs?: number;
+      placedAtMs?: number;
+      filledAtMs?: number;
+      requestLatencyMs?: number;
+      signalLatencyMs?: number;
+      metrics?: StrategyMetrics;
+      market?: Record<string, number | null>;
+    }
+  | {
+      type: "order_requested";
+      requestId: string;
+      signalId?: string;
+      label?: string;
+      action: "buy" | "sell";
+      side: "UP" | "DOWN";
+      price: number;
+      shares: number;
+      requestedAtMs: number;
+      metrics?: StrategyMetrics;
+      market?: Record<string, number | null>;
+    }
+  | {
+      type: "strategy_signal";
+      signalId: string;
+      action: "buy" | "sell";
+      side: "UP" | "DOWN";
+      label?: string;
+      metrics?: StrategyMetrics;
+      market?: Record<string, number | null>;
     }
   | { type: "info"; msg: string; reason?: string }
   | {
@@ -63,12 +96,19 @@ export class Logger {
   private _marketResultProvider:
     | (() => { openPrice?: number; gap?: number; priceToBeat?: number })
     | null = null;
+  private _entryObserver: ((entry: Record<string, unknown>) => void) | null =
+    null;
   private _snapshotTimer: NodeJS.Timeout | null = null;
   private _slotEndMs: number = 0;
 
   /** Inject an orderbook snapshot provider — called automatically before every log entry. */
   setSnapshotProvider(fn: () => object) {
     this._snapshotProvider = fn;
+  }
+
+  /** Observe structured entries as they are appended. Intended for tests/tools. */
+  setEntryObserver(fn: ((entry: Record<string, unknown>) => void) | null) {
+    this._entryObserver = fn;
   }
 
   /** Inject a market result provider — emits a market_price entry when openPrice is available. */
@@ -114,7 +154,7 @@ export class Logger {
     this._snapshotTimer = setInterval(() => this._writeSnapshot(), 1000);
   }
 
-  endSlot(slug: string) {
+  endSlot(slug: string): string | null {
     if (this._snapshotTimer) {
       clearInterval(this._snapshotTimer);
       this._snapshotTimer = null;
@@ -122,7 +162,7 @@ export class Logger {
     this._writeSnapshot();
     this._entries.push("");
     this._append({ type: "slot", action: "end", slug });
-    this._flush();
+    return this._flush();
   }
 
   /** Stop the snapshot timer and discard all buffered entries without writing to disk. */
@@ -170,13 +210,17 @@ export class Logger {
   }
 
   private _append(entry: object) {
-    this._entries.push(JSON.stringify({ ts: Date.now(), ...entry }));
+    const withTs = { ts: Date.now(), ...entry };
+    this._entryObserver?.(withTs);
+    this._entries.push(JSON.stringify(withTs));
   }
 
-  private _flush() {
-    if (!this._filePath || this._entries.length === 0) return;
+  private _flush(): string | null {
+    if (!this._filePath || this._entries.length === 0) return null;
     mkdirSync("logs", { recursive: true });
-    appendFileSync(this._filePath, this._entries.join("\n") + "\n");
+    const text = this._entries.join("\n") + "\n";
+    appendFileSync(this._filePath, text);
     this._entries = [];
+    return text;
   }
 }

@@ -61,6 +61,8 @@ export class FixtureRunner {
   readonly tracker: WalletTracker;
   readonly simUserChannel: SimUserChannel;
   lifecycle!: MarketLifecycle;
+  slotLogText: string | null = null;
+  structuredLogEntries: Record<string, unknown>[] = [];
 
   private clock!: SinonFakeTimers;
   private events: LogEvent[];
@@ -108,7 +110,10 @@ export class FixtureRunner {
    * Install fake timers, create the MarketLifecycle with the given strategy,
    * and tick through INIT → RUNNING.
    */
-  async setup(strategy: Strategy): Promise<void> {
+  async setup(
+    strategy: Strategy,
+    opts: { imageOutput?: boolean } = {},
+  ): Promise<void> {
     // Suppress delays so lifecycle ticks and fills are fast
     process.env.SIM_DELAY_MS = "0";
     process.env.SIM_BALANCE_DELAY_MS = "0";
@@ -137,6 +142,13 @@ export class FixtureRunner {
       ticker: this.simTicker as any,
       orderBook: this.simBook,
       userChannel: this.simUserChannel,
+      imageOutput: opts.imageOutput ?? false,
+      onSlotLog: (text) => {
+        this.slotLogText = text;
+      },
+      onLogEntry: (entry) => {
+        this.structuredLogEntries.push(entry);
+      },
     });
 
     // Apply the first real snapshot (second line has non-null data at LOG_START_TS + 1001ms)

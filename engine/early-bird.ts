@@ -59,7 +59,7 @@ export class EarlyBird {
     this._strategy = strategies[this._strategyName]!;
     this._slotOffset = slotOffset;
     this._alwaysLog = alwaysLog;
-    this._minSessionPnl = parseFloat(process.env.MAX_SESSION_LOSS ?? "3");
+    this._minSessionPnl = parseFloat(process.env.MAX_SESSION_LOSS ?? "30");
     if (prod) {
       this._client = new PolymarketEarlyBirdClient();
     } else {
