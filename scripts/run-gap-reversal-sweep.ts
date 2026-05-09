@@ -169,13 +169,14 @@ async function runPhase(phase: Phase, runId: string, durationMs: number) {
   console.log(`[gap-reversal-sweep] logs: ${logDir}`);
   console.log(`[gap-reversal-sweep] state: ${stateDir}`);
 
+  const bunExecutable = process.env.BUN_EXECUTABLE ?? process.execPath;
   const child = Bun.spawn(
     [
       "sh",
       "-c",
       'trap "" HUP; exec "$@"',
       "gap-reversal-child",
-      "bun",
+      bunExecutable,
       ...args,
     ],
     {
