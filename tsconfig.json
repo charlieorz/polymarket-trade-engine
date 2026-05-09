@@ -25,5 +25,11 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  "exclude": [
+    "analysis",
+    "node_modules",
+    "dist",
+    "build"
+  ]
 }

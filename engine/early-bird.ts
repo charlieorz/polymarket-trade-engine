@@ -16,6 +16,7 @@ import {
 import { WalletTracker } from "./wallet-tracker.ts";
 import { TickerTracker } from "../tracker/ticker";
 import { Env } from "../utils/config.ts";
+import { join } from "path";
 
 const SAVE_INTERVAL_MS = 5000;
 
@@ -51,9 +52,10 @@ export class EarlyBird {
     alwaysLog = false,
   ) {
     this._prod = prod;
+    const stateDir = process.env.STATE_DIR ?? "state";
     this._statePath = prod
-      ? "state/early-bird-prod.json"
-      : "state/early-bird.json";
+      ? join(stateDir, "early-bird-prod.json")
+      : join(stateDir, "early-bird.json");
     this._rounds = rounds;
     this._strategyName = strategyName ?? DEFAULT_STRATEGY;
     this._strategy = strategies[this._strategyName]!;
@@ -119,7 +121,7 @@ export class EarlyBird {
       if (initialBalance === 0) {
         console.error(
           "Wallet balance is $0.00. Fund your funder wallet with pUSD before starting the engine.\n" +
-          "Run `bun scripts/pusd.ts wrap` to convert USDC.e → pUSD, or see docs/MIGRATE_V2.md.",
+            "Run `bun scripts/pusd.ts wrap` to convert USDC.e → pUSD, or see docs/MIGRATE_V2.md.",
         );
         process.exit(1);
       }

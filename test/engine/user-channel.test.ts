@@ -1,7 +1,8 @@
 import { describe, test, expect } from "bun:test";
+import sinon from "sinon";
 import { SimUserChannel } from "../../engine/user-channel.ts";
 import type { OrderRequest } from "../../engine/strategy/types.ts";
-import type { BookSnapshot } from "../../engine/client.ts";
+import { EarlyBirdSimClient, type BookSnapshot } from "../../engine/client.ts";
 
 // SimUserChannel exposes processOrderEvent / processTradeEvent as protected.
 // This subclass surfaces them so tests can drive raw event sequences and
@@ -38,7 +39,9 @@ function makeChannel(): TestableChannel {
   return new TestableChannel({ getBook: () => NULL_BOOK });
 }
 
-function makeRequest(overrides: Partial<OrderRequest["req"]> = {}): OrderRequest {
+function makeRequest(
+  overrides: Partial<OrderRequest["req"]> = {},
+): OrderRequest {
   return {
     req: {
       tokenId: "tok-1",
@@ -267,5 +270,85 @@ describe("UserChannelBase taker fill handling (prod scenario)", () => {
     });
 
     expect(filledShares).toBe(10);
+  });
+});
+
+describe("FAK simulation handling", () => {
+  test("sim client records partial FAK fills", async () => {
+    const book: BookSnapshot = {
+      bestAsk: null,
+      bestAskLiquidity: null,
+      bestBid: 0.5,
+      bestBidLiquidity: 1.5,
+    };
+    const client = new EarlyBirdSimClient(() => book);
+
+    const [placed] = await client.postMultipleOrders([
+      {
+        tokenId: "tok-1",
+        action: "sell",
+        price: 0.5,
+        shares: 6,
+        tickSize: "0.01",
+        negRisk: false,
+        feeRateBps: 0,
+        orderType: "FAK",
+      },
+    ]);
+
+    expect(placed?.orderId).toBeTruthy();
+    const order = await client.getOrderById(placed!.orderId);
+    expect(order?.status).toBe("filled");
+    expect(order?.actualShares).toBe(3);
+  });
+
+  test("sim user channel settles FAK with the immediately fillable partial size", async () => {
+    const previousDelay = process.env.SIM_BALANCE_DELAY_MS;
+    process.env.SIM_BALANCE_DELAY_MS = "0";
+
+    const clock = sinon.useFakeTimers({
+      now: 0,
+      toFake: [
+        "Date",
+        "setTimeout",
+        "setInterval",
+        "clearTimeout",
+        "clearInterval",
+      ],
+      shouldClearNativeTimers: true,
+    });
+
+    const book: BookSnapshot = {
+      bestAsk: null,
+      bestAskLiquidity: null,
+      bestBid: 0.5,
+      bestBidLiquidity: 1.5,
+    };
+    const channel = new SimUserChannel({ getBook: () => book });
+    let filledShares = 0;
+
+    channel.subscribe("condition");
+    channel.trackOrder("order-1", {
+      req: {
+        tokenId: "tok-1",
+        action: "sell",
+        price: 0.5,
+        shares: 6,
+        orderType: "FAK",
+      },
+      expireAtMs: Date.now() + 60_000,
+      onFilled: (shares) => {
+        filledShares = shares;
+      },
+    });
+
+    await clock.tickAsync(200);
+
+    expect(filledShares).toBe(3);
+
+    channel.destroy();
+    clock.restore();
+    if (previousDelay === undefined) delete process.env.SIM_BALANCE_DELAY_MS;
+    else process.env.SIM_BALANCE_DELAY_MS = previousDelay;
   });
 });

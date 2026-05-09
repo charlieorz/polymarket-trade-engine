@@ -18,16 +18,18 @@ function nowIso(): string {
 
 class Log {
   private readonly _filePath: string;
+  private readonly _logDir: string;
   private _buffer: string[] = [];
 
   constructor() {
-    mkdirSync("logs", { recursive: true });
+    this._logDir = process.env.LOG_DIR ?? "logs";
+    mkdirSync(this._logDir, { recursive: true });
     const tag = new Date()
       .toISOString()
       .replace("T", "-")
       .replace(/:/g, "-")
       .slice(0, 19);
-    this._filePath = join("logs", `early-bird-${tag}.log`);
+    this._filePath = join(this._logDir, `early-bird-${tag}.log`);
   }
 
   write(msg: string, color?: LogColor): void {
@@ -39,7 +41,7 @@ class Log {
 
   flush(): void {
     if (this._buffer.length === 0) return;
-    mkdirSync("logs", { recursive: true });
+    mkdirSync(this._logDir, { recursive: true });
     appendFileSync(this._filePath, this._buffer.join(""), "utf8");
     this._buffer = [];
   }

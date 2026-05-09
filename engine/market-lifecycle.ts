@@ -20,7 +20,7 @@ export type PendingOrder = {
   orderId: string;
   tokenId: string;
   action: "buy" | "sell";
-  orderType?: "GTC" | "FOK";
+  orderType?: "GTC" | "FOK" | "FAK";
   price: number;
   shares: number;
   expireAtMs: number;
@@ -778,7 +778,10 @@ export class MarketLifecycle {
               );
               if (!pending) return;
               let fee = 0;
-              if (pending.orderType === "FOK" && this._feeRate > 0) {
+              if (
+                (pending.orderType === "FOK" || pending.orderType === "FAK") &&
+                this._feeRate > 0
+              ) {
                 fee =
                   gross * this._feeRate * pending.price * (1 - pending.price);
               }

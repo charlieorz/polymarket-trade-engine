@@ -1,6 +1,6 @@
 import type { OrderRequest } from "./strategy/types.ts";
 import type { EarlyBirdClient, BookSnapshot } from "./client.ts";
-import { isSimFilled } from "./client.ts";
+import { getSimImmediateFillShares, isSimFilled } from "./client.ts";
 
 export type ApiCreds = { key: string; secret: string; passphrase: string };
 
@@ -384,7 +384,13 @@ export class SimUserChannel extends UserChannelBase {
       if (t.matched) continue; // already synthesized MATCHED, waiting for MINED
       const { req } = t.request;
       const book = this._getBook(req.tokenId);
-      if (!isSimFilled(req, book)) continue;
+      const matchedShares =
+        req.orderType === "FAK"
+          ? getSimImmediateFillShares(req, book)
+          : isSimFilled(req, book)
+            ? req.shares
+            : 0;
+      if (matchedShares <= 0) continue;
 
       // Synthesize an order MATCHED event with one synthetic trade
       const tradeId = crypto.randomUUID();
@@ -402,10 +408,10 @@ export class SimUserChannel extends UserChannelBase {
         this.processTradeEvent({
           id: tradeId,
           status: "MINED",
-          size: String(req.shares),
+          size: String(matchedShares),
           taker_order_id: "",
           maker_orders: [
-            { order_id: orderId, matched_amount: String(req.shares) },
+            { order_id: orderId, matched_amount: String(matchedShares) },
           ],
         });
       }, delay);

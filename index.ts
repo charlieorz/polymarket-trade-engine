@@ -60,27 +60,29 @@ if (!strategies[opts.strategy]) {
   process.exit(1);
 }
 
-if (opts.prod && process.env.FORCE_PROD !== "true") {
-  const answer = await new Promise<string>((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.question(
-      "Run in PRODUCTION mode with real funds? Enter Y to confirm: ",
-      (ans) => {
-        rl.close();
-        resolve(ans);
-      },
-    );
-  });
-
-  if (answer !== "Y") {
-    console.log("Aborted.");
-    process.exit(0);
-  }
-
+if (opts.prod) {
   process.env.PROD = "true";
+
+  if (process.env.FORCE_PROD !== "true") {
+    const answer = await new Promise<string>((resolve) => {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rl.question(
+        "Run in PRODUCTION mode with real funds? Enter Y to confirm: ",
+        (ans) => {
+          rl.close();
+          resolve(ans);
+        },
+      );
+    });
+
+    if (answer !== "Y") {
+      console.log("Aborted.");
+      process.exit(0);
+    }
+  }
 }
 
 const rounds = opts.rounds !== undefined ? opts.rounds : null;

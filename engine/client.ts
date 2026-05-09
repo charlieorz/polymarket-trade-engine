@@ -58,7 +58,7 @@ export type MultiOrderRequest = {
   tickSize: string;
   negRisk: boolean;
   feeRateBps: number; // deprecated field not used in v2
-  orderType?: "GTC" | "FOK";
+  orderType?: "GTC" | "FOK" | "FAK";
 };
 
 export type PlacedOrder = {
@@ -127,6 +127,26 @@ export function isSimFilled(
   }
 }
 
+export function getSimImmediateFillShares(
+  order: { action: "buy" | "sell"; price: number; shares: number },
+  book: BookSnapshot,
+): number {
+  const bookPrice = order.action === "buy" ? book.bestAsk : book.bestBid;
+  const liquidity =
+    order.action === "buy" ? book.bestAskLiquidity : book.bestBidLiquidity;
+
+  if (bookPrice === null || liquidity === null || bookPrice <= 0) return 0;
+
+  const crosses =
+    order.action === "buy"
+      ? bookPrice <= order.price
+      : bookPrice >= order.price;
+  if (!crosses) return 0;
+
+  const availableShares = liquidity / bookPrice;
+  return Math.min(order.shares, availableShares);
+}
+
 /** How long after a buy fills before the sim allows sells on that token. */
 const SIM_BALANCE_DELAY_MS = parseInt(
   process.env.SIM_BALANCE_DELAY_MS ?? "4000",
@@ -191,6 +211,38 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
           success: true,
           errorMsg:
             "order couldn't be fully filled. FOK orders are fully filled or killed.",
+        };
+      }
+
+      // FAK: fill whatever is immediately available, kill the remainder.
+      if (req.orderType === "FAK") {
+        const book = this.getBook(req.tokenId);
+        const filledShares = getSimImmediateFillShares(req, book);
+        if (filledShares > 0) {
+          const orderId = crypto.randomUUID();
+          this._orders.set(orderId, {
+            id: orderId,
+            tokenId: req.tokenId,
+            action: req.action,
+            price: req.price,
+            shares: req.shares,
+            actualShares: filledShares,
+            status: "filled",
+          });
+          if (req.action === "buy") {
+            this._balanceReadyAt.set(
+              req.tokenId,
+              Date.now() + SIM_BALANCE_DELAY_MS,
+            );
+          }
+          return { orderId, status: "matched", success: true, errorMsg: "" };
+        }
+        return {
+          orderId: "",
+          status: "",
+          success: true,
+          errorMsg:
+            "order couldn't be filled. FAK orders fill immediately or are killed.",
         };
       }
 
@@ -261,7 +313,7 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
     // Live = nothing matched yet (mirrors real CLOB where size_matched = 0 for unmatched orders)
     return {
       ...order,
-      actualShares: order.status === "live" ? 0 : order.shares,
+      actualShares: order.status === "live" ? 0 : order.actualShares,
     };
   }
 
@@ -436,7 +488,9 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
         orderType:
           orders[i]!.orderType === "FOK"
             ? ClobOrderType.FOK
-            : ClobOrderType.GTC,
+            : orders[i]!.orderType === "FAK"
+              ? ClobOrderType.FAK
+              : ClobOrderType.GTC,
       })),
     );
     return resp.map((r) => ({

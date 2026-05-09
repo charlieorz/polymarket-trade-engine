@@ -1,7 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 
-const LOCK_DIR = process.env.LOCK_DIR ?? "state";
+const LOCK_DIR = process.env.LOCK_DIR ?? process.env.STATE_DIR ?? "state";
 
 function lockPath(name: string): string {
   return join(LOCK_DIR, `${name}.lock`);

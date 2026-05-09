@@ -100,8 +100,9 @@ export class Logger {
   ) {
     this._entries = [];
     this._slotEndMs = endTime;
-    mkdirSync("logs", { recursive: true });
-    this._filePath = join("logs", `early-bird-${slug}.log`);
+    const logDir = process.env.LOG_DIR ?? "logs";
+    mkdirSync(logDir, { recursive: true });
+    this._filePath = join(logDir, `early-bird-${slug}.log`);
     this._append({
       type: "slot",
       action: "start",
@@ -175,7 +176,7 @@ export class Logger {
 
   private _flush() {
     if (!this._filePath || this._entries.length === 0) return;
-    mkdirSync("logs", { recursive: true });
+    mkdirSync(process.env.LOG_DIR ?? "logs", { recursive: true });
     appendFileSync(this._filePath, this._entries.join("\n") + "\n");
     this._entries = [];
   }
