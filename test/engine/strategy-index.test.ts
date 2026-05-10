@@ -5,4 +5,8 @@ describe("strategy registry", () => {
   test("registers advantage-arb strategy", () => {
     expect(typeof strategies["advantage-arb"]).toBe("function");
   });
+
+  test("registers dual-edge-arb strategy", () => {
+    expect(typeof strategies["dual-edge-arb"]).toBe("function");
+  });
 });
