@@ -9,4 +9,8 @@ describe("strategy registry", () => {
   test("registers dual-edge-arb strategy", () => {
     expect(typeof strategies["dual-edge-arb"]).toBe("function");
   });
+
+  test("registers probability-portfolio strategy", () => {
+    expect(typeof strategies["probability-portfolio"]).toBe("function");
+  });
 });

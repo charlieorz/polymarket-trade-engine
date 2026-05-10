@@ -3,12 +3,14 @@ import { simulationStrategy } from "./simulation.ts";
 import { lateEntry } from "./late-entry.ts";
 import { advantageArb } from "./advantage-arb.ts";
 import { dualEdgeArb } from "./dual-edge-arb.ts";
+import { probabilityPortfolio } from "./probability-portfolio.ts";
 
 export const strategies: Record<string, Strategy> = {
   "simulation": simulationStrategy,
   "late-entry": lateEntry,
   "advantage-arb": advantageArb,
   "dual-edge-arb": dualEdgeArb,
+  "probability-portfolio": probabilityPortfolio,
 };
 
 export const DEFAULT_STRATEGY = "simulation";

@@ -3,7 +3,8 @@
   "module": "index.ts",
   "type": "module",
   "scripts": {
-    "check": "tsc -b --noEmit"
+    "check": "tsc -b --noEmit",
+    "backtest:pp": "bun run scripts/backtest-probability-portfolio.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
