@@ -11,6 +11,9 @@ type Position = {
   entryPrice: number;
   entryGap: number;
   entryAbsGap: number;
+  entrySideGap: number;
+  entryFairProbability: number;
+  entryNetEv: number;
   entryMs: number;
   shares: number;
   takeProfitPrice: number;
@@ -29,6 +32,8 @@ type State = {
   closing: boolean;
   released: boolean;
   settlementHoldLogged: boolean;
+  cooldownActive: boolean;
+  cooldownSignalLogged: boolean;
 };
 
 type EdgeStats = {
@@ -40,6 +45,7 @@ type EdgeStats = {
   lastGap: number | null;
   lastUpdateMs: number;
   gapVelocityHistory: number[];
+  gapChangePerSecondHistory: number[];
   peakSideGapBySide: Record<Side, number>;
   peakSignalStrengthBySide: Record<Side, number>;
   weakTrendSinceMsBySide: Record<Side, number | null>;
@@ -53,6 +59,63 @@ type SettlementView = {
   settlementProfit: number;
   exitProfit: number | null;
   settlementUpside: number | null;
+  pFairSettlement: number;
+  holdEV: number;
+  sellEV: number | null;
+  holdEdge: number | null;
+  sigmaPerSecond: number | null;
+  zToBoundary: number | null;
+};
+
+type FairProbability = {
+  pFair: number;
+  sigmaPerSecond: number | null;
+  zToBoundary: number | null;
+};
+
+type OrderbookQuality = {
+  ask: number;
+  bid: number;
+  askLiquidity: number;
+  bidLiquidity: number;
+  spread: number;
+  depthImbalance: number | null;
+};
+
+type EntryDecision = {
+  side: Side;
+  ask: number;
+  bid: number;
+  liquidity: number;
+  bidLiquidity: number;
+  spread: number;
+  depthImbalance: number | null;
+  entryAbsGap: number;
+  currentSideGap: number;
+  requiredAbsGap: number;
+  entrySignalStrength: number | null;
+  requiredSignalStrength: number;
+  gapZ: number | null;
+  fair: FairProbability;
+  ev: number;
+  netEv: number;
+  riskReward: number;
+  slippageBuffer: number;
+  peakSideGap: number;
+  peakRetainRatio: number | null;
+  entryRetainRatio: number | null;
+  takeProfitPrice: number;
+  stopLossPrice: number;
+};
+
+type CooldownState = {
+  consecutiveLosses: number;
+  cooldownMarketsRemaining: number;
+  observeOnlyMarketsRemaining: number;
+  sessionPnl: number;
+  sessionPeakPnl: number;
+  recentPnls: number[];
+  lastReason: string | null;
 };
 
 const SHARES = 6;
@@ -83,6 +146,31 @@ type AdvantageArbConfig = {
   riskExitMaxRetries: number;
   stopNegativeVelocityEma: number;
   stopVelocityConfirmMs: number;
+  minFairProbability: number;
+  minNetEdge: number;
+  maxSpread: number;
+  minExitLiquidity: number;
+  minSideGap: number;
+  minGapZ: number;
+  maxSignFlipCount: number;
+  minTrendConsistency: number;
+  minRiskReward: number;
+  slippageBuffer: number;
+  profitLockMin: number;
+  trailingDrawdownCents: number;
+  trailingMinProfit: number;
+  hardStopLossCents: number;
+  evStopBuffer: number;
+  timeStopSeconds: number;
+  timeStopMinMfe: number;
+  settlementMinProbability: number;
+  minSettlementHoldEdge: number;
+  cooldownLossCount: number;
+  cooldownMarketsAfterLossStreak: number;
+  cooldownMarketsAfterRiskExit: number;
+  sessionMaxDrawdown: number;
+  recentPnlLookback: number;
+  recentPnlCooldownMarkets: number;
 };
 
 function parseNumberEnv(
@@ -162,6 +250,76 @@ function readConfig(env: Record<string, string | undefined> = process.env): Adva
       0,
       parseNumberEnv(env, "ADV_ARB_STOP_VELOCITY_CONFIRM_MS", 2000),
     ),
+    minFairProbability: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_MIN_FAIR_PROBABILITY", 0.62)),
+    ),
+    minNetEdge: Math.max(0, parseNumberEnv(env, "ADV_ARB_MIN_NET_EDGE", 0.05)),
+    maxSpread: Math.max(0, parseNumberEnv(env, "ADV_ARB_MAX_SPREAD", 0.03)),
+    minExitLiquidity: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_MIN_EXIT_LIQUIDITY", SHARES),
+    ),
+    minSideGap: Math.max(0, parseNumberEnv(env, "ADV_ARB_MIN_SIDE_GAP", 8)),
+    minGapZ: Math.max(0, parseNumberEnv(env, "ADV_ARB_MIN_GAP_Z", 8)),
+    maxSignFlipCount: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_MAX_SIGN_FLIP_COUNT", 2)),
+    ),
+    minTrendConsistency: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_MIN_TREND_CONSISTENCY", 0.55)),
+    ),
+    minRiskReward: Math.max(0, parseNumberEnv(env, "ADV_ARB_MIN_RISK_REWARD", 0.8)),
+    slippageBuffer: Math.max(0, parseNumberEnv(env, "ADV_ARB_SLIPPAGE_BUFFER", 0.005)),
+    profitLockMin: Math.max(0, parseNumberEnv(env, "ADV_ARB_PROFIT_LOCK_MIN", 0.04)),
+    trailingDrawdownCents: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_TRAILING_DRAWDOWN_CENTS", 0.03),
+    ),
+    trailingMinProfit: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_TRAILING_MIN_PROFIT", 0.06),
+    ),
+    hardStopLossCents: Math.max(
+      0.01,
+      parseNumberEnv(env, "ADV_ARB_HARD_STOP_LOSS_CENTS", 0.04),
+    ),
+    evStopBuffer: Math.max(0, parseNumberEnv(env, "ADV_ARB_EV_STOP_BUFFER", 0.04)),
+    timeStopSeconds: Math.max(1, parseNumberEnv(env, "ADV_ARB_TIME_STOP_SECONDS", 45)),
+    timeStopMinMfe: Math.max(0, parseNumberEnv(env, "ADV_ARB_TIME_STOP_MIN_MFE", 0.01)),
+    settlementMinProbability: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_SETTLEMENT_MIN_PROBABILITY", 0.92)),
+    ),
+    minSettlementHoldEdge: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_MIN_SETTLEMENT_HOLD_EDGE", 0.03),
+    ),
+    cooldownLossCount: Math.max(
+      1,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_COOLDOWN_LOSS_COUNT", 2)),
+    ),
+    cooldownMarketsAfterLossStreak: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_COOLDOWN_MARKETS_AFTER_LOSS_STREAK", 1)),
+    ),
+    cooldownMarketsAfterRiskExit: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_COOLDOWN_MARKETS_AFTER_RISK_EXIT", 1)),
+    ),
+    sessionMaxDrawdown: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_SESSION_MAX_DRAWDOWN", 3),
+    ),
+    recentPnlLookback: Math.max(
+      1,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_RECENT_PNL_LOOKBACK", 5)),
+    ),
+    recentPnlCooldownMarkets: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_RECENT_PNL_COOLDOWN_MARKETS", 1)),
+    ),
   };
 }
 
@@ -171,7 +329,7 @@ const ENTRY_ATR_MULTIPLIER = parseFloat(
   process.env.ADV_ARB_ENTRY_ATR_MULTIPLIER ?? "6",
 );
 const MIN_LIQUIDITY = parseFloat(process.env.ADV_ARB_MIN_LIQUIDITY ?? "20");
-const MAX_ENTRY_ASK = parseFloat(process.env.ADV_ARB_MAX_ENTRY_ASK ?? "0.76");
+const MAX_ENTRY_ASK = parseFloat(process.env.ADV_ARB_MAX_ENTRY_ASK ?? "0.72");
 const MIN_ENTRY_ASK = parseFloat(process.env.ADV_ARB_MIN_ENTRY_ASK ?? "0.52");
 const MIN_PROFIT = parseFloat(process.env.ADV_ARB_MIN_PROFIT ?? "0.08");
 const TAKE_PROFIT_BUFFER = parseFloat(
@@ -235,6 +393,91 @@ const EARLY_STOP_MAX_POSITIVE_SIDE_GAP = parseFloat(
 );
 const MIN_HOLD_MS = parseFloat(process.env.ADV_ARB_MIN_HOLD_MS ?? "3000");
 
+const GLOBAL_COOLDOWN: CooldownState = {
+  consecutiveLosses: 0,
+  cooldownMarketsRemaining: 0,
+  observeOnlyMarketsRemaining: 0,
+  sessionPnl: 0,
+  sessionPeakPnl: 0,
+  recentPnls: [],
+  lastReason: null,
+};
+
+function cooldownMetrics(): StrategyMetrics {
+  return {
+    cooldownMarketsRemaining: GLOBAL_COOLDOWN.cooldownMarketsRemaining,
+    observeOnlyMarketsRemaining: GLOBAL_COOLDOWN.observeOnlyMarketsRemaining,
+    consecutiveLosses: GLOBAL_COOLDOWN.consecutiveLosses,
+    sessionPnl: parseFloat(GLOBAL_COOLDOWN.sessionPnl.toFixed(4)),
+    sessionDrawdown: parseFloat(
+      (GLOBAL_COOLDOWN.sessionPnl - GLOBAL_COOLDOWN.sessionPeakPnl).toFixed(4),
+    ),
+    cooldownReason: GLOBAL_COOLDOWN.lastReason,
+  };
+}
+
+function consumeMarketCooldown(): boolean {
+  const active =
+    GLOBAL_COOLDOWN.cooldownMarketsRemaining > 0 ||
+    GLOBAL_COOLDOWN.observeOnlyMarketsRemaining > 0;
+  if (GLOBAL_COOLDOWN.cooldownMarketsRemaining > 0) {
+    GLOBAL_COOLDOWN.cooldownMarketsRemaining--;
+  }
+  if (GLOBAL_COOLDOWN.observeOnlyMarketsRemaining > 0) {
+    GLOBAL_COOLDOWN.observeOnlyMarketsRemaining--;
+  }
+  return active;
+}
+
+function applyCooldown(reason: string, markets: number): void {
+  if (markets <= 0) return;
+  GLOBAL_COOLDOWN.cooldownMarketsRemaining = Math.max(
+    GLOBAL_COOLDOWN.cooldownMarketsRemaining,
+    markets,
+  );
+  GLOBAL_COOLDOWN.lastReason = reason;
+}
+
+function updateCooldownAfterTrade(pnl: number, reason: string, config = CONFIG): void {
+  GLOBAL_COOLDOWN.sessionPnl = parseFloat((GLOBAL_COOLDOWN.sessionPnl + pnl).toFixed(4));
+  GLOBAL_COOLDOWN.sessionPeakPnl = Math.max(
+    GLOBAL_COOLDOWN.sessionPeakPnl,
+    GLOBAL_COOLDOWN.sessionPnl,
+  );
+  GLOBAL_COOLDOWN.recentPnls.push(pnl);
+  if (GLOBAL_COOLDOWN.recentPnls.length > config.recentPnlLookback) {
+    GLOBAL_COOLDOWN.recentPnls.shift();
+  }
+  if (pnl < 0) {
+    GLOBAL_COOLDOWN.consecutiveLosses++;
+  } else {
+    GLOBAL_COOLDOWN.consecutiveLosses = 0;
+  }
+  if (GLOBAL_COOLDOWN.consecutiveLosses >= config.cooldownLossCount) {
+    applyCooldown("loss-streak", config.cooldownMarketsAfterLossStreak);
+  }
+  const drawdown = GLOBAL_COOLDOWN.sessionPnl - GLOBAL_COOLDOWN.sessionPeakPnl;
+  if (drawdown <= -config.sessionMaxDrawdown) {
+    applyCooldown("session-drawdown", config.cooldownMarketsAfterLossStreak);
+  }
+  const recentAvg =
+    GLOBAL_COOLDOWN.recentPnls.reduce((sum, value) => sum + value, 0) /
+    GLOBAL_COOLDOWN.recentPnls.length;
+  if (
+    GLOBAL_COOLDOWN.recentPnls.length >= config.recentPnlLookback &&
+    recentAvg < 0
+  ) {
+    GLOBAL_COOLDOWN.observeOnlyMarketsRemaining = Math.max(
+      GLOBAL_COOLDOWN.observeOnlyMarketsRemaining,
+      config.recentPnlCooldownMarkets,
+    );
+    GLOBAL_COOLDOWN.lastReason = "recent-negative-pnl";
+  }
+  if (reason.includes("expired") || reason.includes("emergency")) {
+    applyCooldown("execution-risk", config.cooldownMarketsAfterRiskExit);
+  }
+}
+
 function ema(previous: number | null, value: number, period: number): number {
   return previous === null ? value : (previous * (period - 1) + value) / period;
 }
@@ -249,6 +492,7 @@ function createEdgeStats(): EdgeStats {
     lastGap: null,
     lastUpdateMs: 0,
     gapVelocityHistory: [],
+    gapChangePerSecondHistory: [],
     peakSideGapBySide: { UP: 0, DOWN: 0 },
     peakSignalStrengthBySide: { UP: 0, DOWN: 0 },
     weakTrendSinceMsBySide: { UP: null, DOWN: null },
@@ -268,6 +512,7 @@ function updateStats(
     stats.atr = ema(stats.atr, tr, config.atrPeriod);
   }
   if (stats.lastGap !== null) {
+    const dtSeconds = Math.max((now - stats.lastUpdateMs) / 1000, EPSILON);
     const gapVelocity = gap - stats.lastGap;
     stats.gapVelocity = gapVelocity;
     stats.gapVelocityEma = ema(
@@ -277,8 +522,12 @@ function updateStats(
     );
     stats.gapAtr = ema(stats.gapAtr, Math.abs(gapVelocity), config.gapAtrPeriod);
     stats.gapVelocityHistory.push(gapVelocity);
+    stats.gapChangePerSecondHistory.push(gapVelocity / dtSeconds);
     if (stats.gapVelocityHistory.length > config.trendLookback) {
       stats.gapVelocityHistory.shift();
+    }
+    if (stats.gapChangePerSecondHistory.length > 45) {
+      stats.gapChangePerSecondHistory.shift();
     }
   }
   stats.lastPrice = price;
@@ -326,6 +575,108 @@ function signFlipCount(stats: EdgeStats): number {
     previous = sign;
   }
   return flips;
+}
+
+function standardDeviation(values: number[]): number | null {
+  if (values.length < 4) return null;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+    (values.length - 1);
+  return Math.sqrt(Math.max(0, variance));
+}
+
+function computeRollingVolatility(stats: EdgeStats): number | null {
+  return standardDeviation(stats.gapChangePerSecondHistory);
+}
+
+function erf(x: number): number {
+  const sign = x < 0 ? -1 : 1;
+  const absX = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * absX);
+  const y =
+    1 -
+    (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t -
+      0.284496736) *
+      t +
+      0.254829592) *
+      t *
+      Math.exp(-absX * absX));
+  return sign * y;
+}
+
+function normalCdf(z: number): number {
+  return 0.5 * (1 + erf(z / Math.SQRT2));
+}
+
+function computeFairProbability(params: {
+  sideGap: number;
+  remaining: number;
+  sigmaPerSecond: number | null;
+}): FairProbability {
+  const sigma = params.sigmaPerSecond;
+  if (sigma === null || sigma <= EPSILON) {
+    return {
+      pFair: 0.5,
+      sigmaPerSecond: sigma,
+      zToBoundary: null,
+    };
+  }
+  const zToBoundary =
+    params.sideGap / Math.max(sigma * Math.sqrt(Math.max(1, params.remaining)), EPSILON);
+  return {
+    pFair: Math.max(0.01, Math.min(0.99, normalCdf(zToBoundary))),
+    sigmaPerSecond: sigma,
+    zToBoundary,
+  };
+}
+
+function computeOrderbookQuality(params: {
+  ask: { price: number; liquidity: number } | null;
+  bid: { price: number; liquidity: number } | null;
+}): OrderbookQuality | null {
+  if (!params.ask || !params.bid) return null;
+  const spread = parseFloat((params.ask.price - params.bid.price).toFixed(4));
+  const depthTotal = params.ask.liquidity + params.bid.liquidity;
+  return {
+    ask: params.ask.price,
+    bid: params.bid.price,
+    askLiquidity: params.ask.liquidity,
+    bidLiquidity: params.bid.liquidity,
+    spread,
+    depthImbalance:
+      depthTotal > 0
+        ? parseFloat(((params.bid.liquidity - params.ask.liquidity) / depthTotal).toFixed(4))
+        : null,
+  };
+}
+
+function computeEntryEdge(params: {
+  pFair: number;
+  ask: number;
+  spread: number;
+  config?: AdvantageArbConfig;
+}): { ev: number; netEv: number; slippageBuffer: number } {
+  const config = params.config ?? CONFIG;
+  const slippageBuffer = Math.max(config.slippageBuffer, params.spread + 0.005);
+  return {
+    ev: parseFloat((params.pFair - params.ask).toFixed(4)),
+    netEv: parseFloat((params.pFair - params.ask - slippageBuffer).toFixed(4)),
+    slippageBuffer: parseFloat(slippageBuffer.toFixed(4)),
+  };
+}
+
+function computeRiskReward(params: {
+  ask: number;
+  targetExitBid: number;
+  stopPrice: number;
+}): number {
+  const expectedUpside = Math.max(
+    0,
+    Math.min(1 - params.ask, params.targetExitBid - params.ask),
+  );
+  const expectedDownside = Math.max(0.01, params.ask - params.stopPrice);
+  return parseFloat((expectedUpside / expectedDownside).toFixed(4));
 }
 
 function computeEntrySignalStrength(absGap: number, atr: number | null): number | null {
@@ -494,10 +845,14 @@ function bestBidInfo(ctx: StrategyContext, side: Side) {
   return ctx.orderBook.bestBidInfo(side);
 }
 
-function plannedStopLossPrice(entryAsk: number): number {
+function plannedStopLossPrice(
+  entryAsk: number,
+  config: AdvantageArbConfig = CONFIG,
+): number {
   return Math.max(
+    0.01,
     STOP_LOSS_PRICE,
-    parseFloat((entryAsk - MAX_PRICE_LOSS).toFixed(2)),
+    parseFloat((entryAsk - config.hardStopLossCents).toFixed(2)),
   );
 }
 
@@ -505,6 +860,7 @@ function settlementView(params: {
   pos: Position;
   gap: number;
   bid: number | null;
+  bidLiquidity?: number | null;
   remaining: number;
   atr: number | null;
   stats?: EdgeStats;
@@ -527,25 +883,40 @@ function settlementView(params: {
   const settlementProfit = parseFloat((1 - pos.entryPrice).toFixed(4));
   const exitProfit = bid === null ? null : parseFloat((bid - pos.entryPrice).toFixed(4));
   const settlementUpside = bid === null ? null : parseFloat((1 - bid).toFixed(4));
+  const fair = computeFairProbability({
+    sideGap: currentSideGap,
+    remaining,
+    sigmaPerSecond: params.stats ? computeRollingVolatility(params.stats) : null,
+  });
+  const holdEV = fair.pFair;
+  const sellEV = bid;
+  const holdEdge = bid === null ? null : parseFloat((holdEV - bid).toFixed(4));
+  const velocityEma = params.stats
+    ? sideGapVelocityEma(params.stats, pos.side)
+    : null;
+  const flips = params.stats ? signFlipCount(params.stats) : 0;
+  const bidIsExcellent =
+    bid !== null && bid >= SETTLEMENT_EXIT_MIN_BID && (holdEdge === null || holdEdge < 0.06);
+  const bidLiquidityWeak =
+    params.bidLiquidity !== undefined &&
+    params.bidLiquidity !== null &&
+    params.bidLiquidity < pos.shares;
 
-  // 结算收益是二元市场的核心：当临近结束且自己仍有足够 gap 领先时，
-  // 低价卖出相当于主动放弃 1.00 结算空间。只有盘口 bid 已接近满额，
-  // 或优势不足以覆盖尾盘反转风险时，才继续走止盈/止损卖出分支。
   const holdToSettlement =
     remaining <= SETTLEMENT_HOLD_MAX_REMAINING &&
     currentSideGap >= requiredSideGap &&
-    (bid === null || bid < SETTLEMENT_EXIT_MIN_BID);
+    fair.pFair >= config.settlementMinProbability &&
+    (holdEdge === null || holdEdge >= config.minSettlementHoldEdge || bidLiquidityWeak) &&
+    !bidIsExcellent;
   const peakRetainRatio =
     pos.peakSideGap > 0 ? currentSideGap / pos.peakSideGap : null;
-  const sideVelocityEma = params.stats
-    ? sideGapVelocityEma(params.stats, pos.side)
-    : null;
   const invalidating =
     holdToSettlement &&
     ((peakRetainRatio !== null &&
       peakRetainRatio < config.settlementInvalidateRetainRatio) ||
-      (sideVelocityEma !== null &&
-        sideVelocityEma <= config.settlementInvalidateVelocityEma));
+      (velocityEma !== null &&
+        velocityEma <= config.settlementInvalidateVelocityEma) ||
+      flips > config.maxSignFlipCount);
   if (!holdToSettlement || !invalidating) {
     pos.settlementInvalidSinceMs = null;
   } else if (params.now !== undefined && pos.settlementInvalidSinceMs === null) {
@@ -566,6 +937,14 @@ function settlementView(params: {
     settlementProfit,
     exitProfit,
     settlementUpside,
+    pFairSettlement: parseFloat(fair.pFair.toFixed(4)),
+    holdEV: parseFloat(holdEV.toFixed(4)),
+    sellEV: sellEV === null ? null : parseFloat(sellEV.toFixed(4)),
+    holdEdge,
+    sigmaPerSecond:
+      fair.sigmaPerSecond === null ? null : parseFloat(fair.sigmaPerSecond.toFixed(6)),
+    zToBoundary:
+      fair.zToBoundary === null ? null : parseFloat(fair.zToBoundary.toFixed(4)),
   };
 }
 
@@ -655,6 +1034,14 @@ function buildMetrics(params: {
     settlementProfit: settlement?.settlementProfit ?? null,
     exitProfit: settlement?.exitProfit ?? null,
     settlementUpside: settlement?.settlementUpside ?? null,
+    pFairSettlement: settlement?.pFairSettlement ?? null,
+    holdEV: settlement?.holdEV ?? null,
+    sellEV: settlement?.sellEV ?? null,
+    holdEdge: settlement?.holdEdge ?? null,
+    sigmaPerSecond: settlement?.sigmaPerSecond ?? null,
+    zToBoundary: settlement?.zToBoundary ?? null,
+    entryFairProbability: position?.entryFairProbability ?? null,
+    entryNetEv: position?.entryNetEv ?? null,
     gapRetainRatio:
       position && gap !== null && position.peakSideGap > 0
         ? parseFloat((sideGap(position.side, gap) / position.peakSideGap).toFixed(4))
@@ -674,6 +1061,126 @@ function buildMetrics(params: {
   };
 }
 
+function shouldEnterAdvantageArb(params: {
+  ctx: StrategyContext;
+  remaining: number;
+  gap: number;
+  stats: EdgeStats;
+  now: number;
+  config?: AdvantageArbConfig;
+}): EntryDecision | null {
+  const { ctx, remaining, gap, stats } = params;
+  const config = params.config ?? CONFIG;
+  const side = advantageSide(gap);
+  const ask = bestAsk(ctx, side);
+  const bid = bestBidInfo(ctx, side);
+  const quality = computeOrderbookQuality({ ask, bid });
+  if (!quality) return null;
+  if (quality.spread < 0 || quality.spread > config.maxSpread) return null;
+  if (quality.askLiquidity < MIN_LIQUIDITY) return null;
+  if (quality.bidLiquidity < config.minExitLiquidity) return null;
+
+  const absGap = Math.abs(gap);
+  const currentSideGap = sideGap(side, gap);
+  const requiredAbsGap = Math.max(
+    config.minSideGap,
+    MIN_ABS_GAP,
+    stats.atr !== null ? stats.atr * ENTRY_ATR_MULTIPLIER : MIN_ABS_GAP,
+  );
+  const entrySignalStrength = computeEntrySignalStrength(absGap, stats.atr);
+  const requiredSignalStrength = config.minEntrySignalStrength;
+  const gapZ =
+    stats.gapAtr !== null
+      ? parseFloat((currentSideGap / Math.max(stats.gapAtr, EPSILON)).toFixed(4))
+      : null;
+  if (currentSideGap < requiredAbsGap) return null;
+  if (gapZ === null || gapZ < config.minGapZ) return null;
+
+  const fair = computeFairProbability({
+    sideGap: currentSideGap,
+    remaining,
+    sigmaPerSecond: computeRollingVolatility(stats),
+  });
+  if (fair.pFair < config.minFairProbability) return null;
+
+  const edge = computeEntryEdge({
+    pFair: fair.pFair,
+    ask: quality.ask,
+    spread: quality.spread,
+    config,
+  });
+  if (edge.netEv < config.minNetEdge) return null;
+
+  const hasEnoughSignal =
+    requiredSignalStrength <= 0 ||
+    (entrySignalStrength !== null && entrySignalStrength >= requiredSignalStrength);
+  const hasUsablePrice = quality.ask >= MIN_ENTRY_ASK && quality.ask <= MAX_ENTRY_ASK;
+  const targetExitBid = Math.min(
+    MAX_TAKE_PROFIT_PRICE,
+    quality.ask + Math.max(config.profitLockMin, MIN_PROFIT / 2),
+  );
+  const stopPrice = plannedStopLossPrice(quality.ask, config);
+  const riskReward = computeRiskReward({
+    ask: quality.ask,
+    targetExitBid,
+    stopPrice,
+  });
+  if (!hasEnoughSignal || !hasUsablePrice || riskReward < config.minRiskReward) {
+    return null;
+  }
+  if (quality.ask > 0.75 && (fair.pFair < 0.9 || edge.netEv < config.minNetEdge + 0.03)) {
+    return null;
+  }
+
+  const currentTrendConsistency = trendConsistency(stats, side);
+  const flips = signFlipCount(stats);
+  const currentVelocityEma = sideGapVelocityEma(stats, side);
+  if (
+    currentTrendConsistency !== null &&
+    currentTrendConsistency < config.minTrendConsistency
+  ) {
+    return null;
+  }
+  if (flips > config.maxSignFlipCount) return null;
+  if (currentVelocityEma !== null && currentVelocityEma < -0.1) return null;
+
+  const retrace = detectAntiRetraceEntry({
+    stats,
+    side,
+    currentSideGap,
+    entrySignalStrength,
+    now: params.now,
+    config,
+  });
+  if (!retrace.allowed) return null;
+
+  return {
+    side,
+    ask: quality.ask,
+    bid: quality.bid,
+    liquidity: quality.askLiquidity,
+    bidLiquidity: quality.bidLiquidity,
+    spread: quality.spread,
+    depthImbalance: quality.depthImbalance,
+    entryAbsGap: absGap,
+    currentSideGap,
+    requiredAbsGap,
+    entrySignalStrength,
+    requiredSignalStrength,
+    gapZ,
+    fair,
+    ev: edge.ev,
+    netEv: edge.netEv,
+    riskReward,
+    slippageBuffer: edge.slippageBuffer,
+    peakSideGap: retrace.peakSideGap,
+    peakRetainRatio: retrace.peakRetainRatio,
+    entryRetainRatio: retrace.entryRetainRatio,
+    takeProfitPrice: targetExitBid,
+    stopLossPrice: stopPrice,
+  };
+}
+
 function checkEntry(params: {
   ctx: StrategyContext;
   remaining: number;
@@ -683,22 +1190,7 @@ function checkEntry(params: {
   stats: EdgeStats;
   now: number;
   config?: AdvantageArbConfig;
-}):
-  | {
-      side: Side;
-      ask: number;
-      liquidity: number;
-      entryAbsGap: number;
-      requiredAbsGap: number;
-      entrySignalStrength: number | null;
-      requiredSignalStrength: number;
-      peakSideGap: number;
-      peakRetainRatio: number | null;
-      entryRetainRatio: number | null;
-      takeProfitPrice: number;
-      stopLossPrice: number;
-    }
-  | null {
+}): EntryDecision | null {
   const { ctx, remaining, gap, stats } = params;
   const config = params.config ?? CONFIG;
   const time = canEnterByTime({
@@ -711,63 +1203,7 @@ function checkEntry(params: {
   if (!time.allowed) {
     return null;
   }
-
-  const side = advantageSide(gap);
-  const absGap = Math.abs(gap);
-  const requiredAbsGap = Math.max(
-    MIN_ABS_GAP,
-    stats.atr !== null ? stats.atr * ENTRY_ATR_MULTIPLIER : MIN_ABS_GAP,
-  );
-  const entrySignalStrength = computeEntrySignalStrength(absGap, stats.atr);
-  const currentSideGap = sideGap(side, gap);
-  const retrace = detectAntiRetraceEntry({
-    stats,
-    side,
-    currentSideGap,
-    entrySignalStrength,
-    now: params.now,
-    config,
-  });
-  const ask = bestAsk(ctx, side);
-  if (!ask) return null;
-
-  const hasEnoughGap = absGap >= requiredAbsGap;
-  const hasEnoughSignal =
-    config.minEntrySignalStrength <= 0 ||
-    (entrySignalStrength !== null &&
-      entrySignalStrength >= config.minEntrySignalStrength);
-  const hasUsablePrice = ask.price >= MIN_ENTRY_ASK && ask.price <= MAX_ENTRY_ASK;
-  const hasRoomToProfit = ask.price + MIN_PROFIT <= MAX_TAKE_PROFIT_PRICE;
-  const hasLiquidity = ask.liquidity >= MIN_LIQUIDITY;
-
-  if (
-    !hasEnoughGap ||
-    !hasEnoughSignal ||
-    !hasUsablePrice ||
-    !hasRoomToProfit ||
-    !hasLiquidity ||
-    !retrace.allowed
-  ) {
-    return null;
-  }
-
-  return {
-    side,
-    ask: ask.price,
-    liquidity: ask.liquidity,
-    entryAbsGap: absGap,
-    requiredAbsGap,
-    entrySignalStrength,
-    requiredSignalStrength: config.minEntrySignalStrength,
-    peakSideGap: retrace.peakSideGap,
-    peakRetainRatio: retrace.peakRetainRatio,
-    entryRetainRatio: retrace.entryRetainRatio,
-    takeProfitPrice: Math.min(
-      MAX_TAKE_PROFIT_PRICE,
-      parseFloat((ask.price + MIN_PROFIT + TAKE_PROFIT_BUFFER).toFixed(2)),
-    ),
-    stopLossPrice: plannedStopLossPrice(ask.price),
-  };
+  return shouldEnterAdvantageArb({ ctx, remaining, gap, stats, now: params.now, config });
 }
 
 function updatePositionEdge(pos: Position, gap: number, bid: number | null): void {
@@ -842,6 +1278,7 @@ function shouldTakeProfit(params: {
     pos,
     gap,
     bid,
+    bidLiquidity,
     remaining,
     atr: stats.atr,
     stats,
@@ -857,14 +1294,16 @@ function shouldTakeProfit(params: {
     pos.peakSideGap > 0 ? currentSideGap / pos.peakSideGap : 0;
   const currentTrendConsistency = trendConsistency(stats, pos.side);
   const currentSideVelocityEma = sideGapVelocityEma(stats, pos.side);
-  const hasMinimumProfit = bid >= pos.entryPrice + MIN_PROFIT;
+  const profit = bid - pos.entryPrice;
+  const continueEdge = settlement.pFairSettlement - bid;
+  const hasMinimumProfit = profit >= config.profitLockMin;
   const reachedPlannedProfit = bid >= pos.takeProfitPrice;
   const hasExecutableBid =
     bidLiquidity === null || bidLiquidity >= TAKE_PROFIT_MIN_BID_LIQUIDITY;
-  const expandedEnough =
-    pos.peakSideGap >= pos.entryAbsGap * TAKE_PROFIT_PEAK_EXPANSION_RATIO;
-  const retracedFromPeak =
-    expandedEnough && currentSideGap <= pos.peakSideGap * TAKE_PROFIT_TRAIL_RATIO;
+  const peakBid = pos.peakBid ?? bid;
+  const bidDrawdown = peakBid - bid;
+  const bidDrawdownRatio =
+    peakBid > pos.entryPrice ? bidDrawdown / Math.max(peakBid - pos.entryPrice, EPSILON) : 0;
   const trendStillSupports =
     config.gapAwareTakeProfitEnabled &&
     remaining > TAKE_PROFIT_LOCK_REMAINING &&
@@ -875,15 +1314,35 @@ function shouldTakeProfit(params: {
       currentTrendConsistency >= config.takeProfitDelayMinTrendConsistency) &&
     peakRetainRatio >= config.takeProfitDelayMinPeakRetainRatio;
 
+  if (
+    hasMinimumProfit &&
+    hasExecutableBid &&
+    (continueEdge <= 0.015 ||
+      currentSideVelocityEma === null ||
+      currentSideVelocityEma < config.takeProfitDelayMinSideVelocityEma)
+  ) {
+    return { price: bid, reason: "profit lock", mode: "profit-lock" };
+  }
+
+  if (
+    profit > 0 &&
+    peakBid - pos.entryPrice >= config.trailingMinProfit &&
+    (bidDrawdown >= config.trailingDrawdownCents || bidDrawdownRatio >= 0.4)
+  ) {
+    return { price: bid, reason: "bid trailing take-profit", mode: "bid-trailing" };
+  }
+
+  if (
+    remaining <= 90 &&
+    profit > 0 &&
+    (currentSideVelocityEma === null || currentSideVelocityEma < 0 || continueEdge < 0.02)
+  ) {
+    return { price: bid, reason: "time profit protection", mode: "time-profit" };
+  }
+
   if (hasMinimumProfit && reachedPlannedProfit && hasExecutableBid) {
     if (trendStillSupports) return null;
     return { price: bid, reason: "planned take-profit", mode: "planned" };
-  }
-
-  // 计划止盈优先锁定已经出现的正收益；如果顶层 bid 流动性不足，
-  // 再退回到优势回撤和尾盘锁利，避免为了几股薄流动性过早放弃大趋势。
-  if (hasMinimumProfit && retracedFromPeak) {
-    return { price: bid, reason: "trailing take-profit", mode: "trailing" };
   }
 
   if (remaining <= TAKE_PROFIT_LOCK_REMAINING && reachedPlannedProfit) {
@@ -964,6 +1423,22 @@ function shouldEarlyStopLoss(params: {
   const edge = markAdverseState(pos, gap, now);
   const fallbackPrice = Math.max(0.01, Math.min(pos.stopLossPrice, pos.entryPrice - 0.01));
   const price = bid ?? fallbackPrice;
+  if (bid !== null && bid <= pos.entryPrice - config.hardStopLossCents) {
+    return { price: bid, reason: "hard stop-loss", mode: "hard-price", edge };
+  }
+  if (
+    settlement.pFairSettlement < pos.entryPrice - config.evStopBuffer ||
+    settlement.pFairSettlement < pos.entryFairProbability - config.evStopBuffer * 2
+  ) {
+    return { price, reason: "EV stop-loss", mode: "ev", edge };
+  }
+  if (
+    edge.holdMs >= config.timeStopSeconds * 1000 &&
+    (pos.peakBid === null || pos.peakBid < pos.entryPrice + config.timeStopMinMfe) &&
+    remaining > 45
+  ) {
+    return { price, reason: "time stop-loss", mode: "time", edge };
+  }
   if (settlement.holdInvalidated && edge.holdMs >= MIN_HOLD_MS) {
     return {
       price,
@@ -1068,6 +1543,10 @@ function placeSell(params: {
         getMetrics,
       },
       onFilled() {
+        updateCooldownAfterTrade(
+          parseFloat(((price - pos.entryPrice) * pos.shares).toFixed(4)),
+          reason,
+        );
         state.position = null;
         ctx.log(
           `[${ctx.slug}] advantage-arb: SELL ${pos.side} filled @ ${price} (${reason})`,
@@ -1076,6 +1555,7 @@ function placeSell(params: {
         releaseOnce(state, release);
       },
       onExpired() {
+        applyCooldown("sell-expired", CONFIG.cooldownMarketsAfterRiskExit);
         ctx.log(
           `[${ctx.slug}] advantage-arb: SELL ${pos.side} @ ${price} expired — emergency selling`,
           "red",
@@ -1149,6 +1629,8 @@ export const advantageArb: Strategy = async (ctx) => {
     closing: false,
     released: false,
     settlementHoldLogged: false,
+    cooldownActive: consumeMarketCooldown(),
+    cooldownSignalLogged: false,
   };
   const stats = createEdgeStats();
 
@@ -1169,6 +1651,35 @@ export const advantageArb: Strategy = async (ctx) => {
     updateStats(stats, btcPrice, gap, now);
 
     if (!state.entered) {
+      if (state.cooldownActive) {
+        if (!state.cooldownSignalLogged) {
+          state.cooldownSignalLogged = true;
+          const side = advantageSide(gap);
+          ctx.recordSignal({
+            action: "buy",
+            side,
+            label: "advantage-arb cooldown observe-only",
+            metrics: buildMetrics({
+              ctx,
+              remaining,
+              btcPrice,
+              priceToBeat,
+              gap,
+              side,
+              stats,
+              extra: {
+                entryBlockedReason: "cooldown",
+                ...cooldownMetrics(),
+              },
+            }),
+          });
+          ctx.log(
+            `[${ctx.slug}] advantage-arb: cooldown observe-only (${GLOBAL_COOLDOWN.lastReason ?? "active"})`,
+            "yellow",
+          );
+        }
+        return;
+      }
       const entry = checkEntry({
         ctx,
         remaining,
@@ -1201,6 +1712,24 @@ export const advantageArb: Strategy = async (ctx) => {
                 ? null
                 : parseFloat(trendConsistency(stats, entry.side)!.toFixed(4)),
             peakSideGap: entry.peakSideGap,
+            gapZ: entry.gapZ,
+            pFair: parseFloat(entry.fair.pFair.toFixed(4)),
+            sigmaPerSecond:
+              entry.fair.sigmaPerSecond === null
+                ? null
+                : parseFloat(entry.fair.sigmaPerSecond.toFixed(6)),
+            zToBoundary:
+              entry.fair.zToBoundary === null
+                ? null
+                : parseFloat(entry.fair.zToBoundary.toFixed(4)),
+            ev: entry.ev,
+            netEv: entry.netEv,
+            slippageBuffer: entry.slippageBuffer,
+            riskReward: entry.riskReward,
+            spread: entry.spread,
+            entryBid: entry.bid,
+            entryBidLiquidity: entry.bidLiquidity,
+            depthImbalance: entry.depthImbalance,
             peakRetainRatio:
               entry.peakRetainRatio === null
                 ? null
@@ -1260,6 +1789,12 @@ export const advantageArb: Strategy = async (ctx) => {
                     requiredSignalStrength: entry.requiredSignalStrength,
                     entrySignalStrength: entry.entrySignalStrength,
                     entryAsk: entry.ask,
+                    entryBid: entry.bid,
+                    gapZ: entry.gapZ,
+                    pFair: parseFloat(entry.fair.pFair.toFixed(4)),
+                    netEv: entry.netEv,
+                    riskReward: entry.riskReward,
+                    spread: entry.spread,
                     plannedTakeProfit: entry.takeProfitPrice,
                     plannedStopLoss: entry.stopLossPrice,
                   },
@@ -1272,12 +1807,16 @@ export const advantageArb: Strategy = async (ctx) => {
               const fillGap =
                 ctx.ticker.price !== undefined ? ctx.ticker.price - priceToBeat : gap;
               const entryAbsGap = Math.abs(fillGap);
+              const entrySideGap = sideGap(entry.side, fillGap);
               state.position = {
                 side: entry.side,
                 tokenId,
                 entryPrice: entry.ask,
                 entryGap: fillGap,
                 entryAbsGap,
+                entrySideGap,
+                entryFairProbability: entry.fair.pFair,
+                entryNetEv: entry.netEv,
                 entryMs: Date.now(),
                 shares: filledShares,
                 takeProfitPrice: entry.takeProfitPrice,
@@ -1296,6 +1835,7 @@ export const advantageArb: Strategy = async (ctx) => {
               );
             },
             onExpired() {
+              applyCooldown("buy-expired", CONFIG.cooldownMarketsAfterRiskExit);
               ctx.log(
                 `[${ctx.slug}] advantage-arb: BUY ${entry.side} @ ${entry.ask} expired — no position`,
                 "yellow",
@@ -1339,8 +1879,8 @@ export const advantageArb: Strategy = async (ctx) => {
       bid,
       bidLiquidity: bidInfo?.liquidity ?? null,
       remaining,
-        stats,
-      });
+      stats,
+    });
     if (takeProfit) {
       placeSell({
         ctx,
@@ -1498,6 +2038,12 @@ export const __advantageArbTestHooks = {
   readConfig,
   createEdgeStats,
   updateStats,
+  computeRollingVolatility,
+  computeFairProbability,
+  computeOrderbookQuality,
+  computeEntryEdge,
+  computeRiskReward,
+  shouldEnterAdvantageArb,
   computeEntrySignalStrength,
   canEnterByTime,
   detectAntiRetraceEntry,
@@ -1508,4 +2054,7 @@ export const __advantageArbTestHooks = {
   plannedStopLossPrice,
   shouldTakeProfit,
   shouldEarlyStopLoss,
+  cooldownMetrics,
+  applyCooldown,
+  updateCooldownAfterTrade,
 };

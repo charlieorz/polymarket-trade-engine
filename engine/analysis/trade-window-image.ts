@@ -299,8 +299,21 @@ function collectOrders(entries: LogEntry[]): OrderPoint[] {
       market: e.market,
     }));
 
-  const placed = orders.filter((o) => o.status === "placed");
-  return placed.length > 0 ? placed : orders;
+  const byActionSide = new Map<string, OrderPoint[]>();
+  for (const order of orders) {
+    const key = `${order.action}:${order.side}`;
+    byActionSide.set(key, [...(byActionSide.get(key) ?? []), order]);
+  }
+  const resolved: OrderPoint[] = [];
+  for (const group of byActionSide.values()) {
+    const filled = group.filter((order) => order.status === "filled");
+    if (filled.length > 0) {
+      resolved.push(...filled);
+      continue;
+    }
+    resolved.push(...group.filter((order) => order.status === "placed"));
+  }
+  return resolved.sort((a, b) => a.ts - b.ts);
 }
 
 function collectSignals(entries: LogEntry[]): SignalPoint[] {

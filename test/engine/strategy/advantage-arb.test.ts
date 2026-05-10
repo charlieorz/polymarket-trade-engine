@@ -7,6 +7,9 @@ const basePosition = {
   entryPrice: 0.76,
   entryGap: 10.9,
   entryAbsGap: 10.9,
+  entrySideGap: 10.9,
+  entryFairProbability: 0.82,
+  entryNetEv: 0.05,
   entryMs: 1_000,
   shares: 6,
   takeProfitPrice: 0.86,
@@ -23,6 +26,7 @@ function statsWith(overrides = {}) {
   return {
     ...__advantageArbTestHooks.createEdgeStats(),
     atr: 0.84,
+    gapChangePerSecondHistory: [0.4, -0.2, 0.5, -0.3, 0.2, -0.1],
     ...overrides,
   };
 }
@@ -89,11 +93,11 @@ describe("advantage-arb risk exits", () => {
   });
 
   test("uses a dynamic stop price based on entry ask", () => {
-    expect(__advantageArbTestHooks.plannedStopLossPrice(0.76)).toBe(0.64);
+    expect(__advantageArbTestHooks.plannedStopLossPrice(0.76)).toBe(0.72);
     expect(__advantageArbTestHooks.plannedStopLossPrice(0.52)).toBe(0.48);
   });
 
-  test("locks the planned take profit when bid and liquidity are sufficient", () => {
+  test("locks profit when bid is positive and continue edge is weak", () => {
     const exit = __advantageArbTestHooks.shouldTakeProfit({
       pos: { ...basePosition },
       gap: 15.47,
@@ -105,8 +109,8 @@ describe("advantage-arb risk exits", () => {
 
     expect(exit).toEqual({
       price: 0.86,
-      reason: "planned take-profit",
-      mode: "planned",
+      reason: "profit lock",
+      mode: "profit-lock",
     });
   });
 
@@ -133,6 +137,7 @@ describe("advantage-arb risk exits", () => {
       stats: statsWith({
         gapVelocityEma: 0.4,
         gapVelocityHistory: [0.2, 0.3, 0.1, 0.4],
+        gapChangePerSecondHistory: [0.2, 0.22, 0.18, 0.21, 0.19, 0.2],
       }),
     });
 
@@ -170,7 +175,70 @@ describe("advantage-arb risk exits", () => {
     });
 
     expect(exit?.price).toBe(0.63);
-    expect(exit?.reason).toBe("price stop-loss");
+    expect(exit?.reason).toBe("hard stop-loss");
+  });
+
+  test("fair probability rises with side gap and remaining-adjusted confidence", () => {
+    const low = __advantageArbTestHooks.computeFairProbability({
+      sideGap: 2,
+      remaining: 120,
+      sigmaPerSecond: 1,
+    });
+    const high = __advantageArbTestHooks.computeFairProbability({
+      sideGap: 8,
+      remaining: 120,
+      sigmaPerSecond: 1,
+    });
+    const late = __advantageArbTestHooks.computeFairProbability({
+      sideGap: 8,
+      remaining: 30,
+      sigmaPerSecond: 1,
+    });
+
+    expect(high.pFair).toBeGreaterThan(low.pFair);
+    expect(late.pFair).toBeGreaterThan(high.pFair);
+  });
+
+  test("computes net EV after spread and slippage buffer", () => {
+    expect(
+      __advantageArbTestHooks.computeEntryEdge({
+        pFair: 0.7,
+        ask: 0.62,
+        spread: 0.02,
+        config: __advantageArbTestHooks.readConfig({
+          ADV_ARB_SLIPPAGE_BUFFER: "0.005",
+        }),
+      }).netEv,
+    ).toBeCloseTo(0.055, 6);
+  });
+
+  test("profit lock does not trigger while position is losing", () => {
+    const exit = __advantageArbTestHooks.shouldTakeProfit({
+      pos: { ...basePosition },
+      gap: 15.47,
+      bid: 0.75,
+      bidLiquidity: 494,
+      remaining: 208,
+      stats: statsWith(),
+    });
+
+    expect(exit).toBeNull();
+  });
+
+  test("hard stop exits when bid breaches configured loss", () => {
+    const exit = __advantageArbTestHooks.shouldEarlyStopLoss({
+      pos: { ...basePosition },
+      gap: 10,
+      bid: 0.71,
+      now: basePosition.entryMs + 1_000,
+      remaining: 170,
+      stats: statsWith(),
+      config: __advantageArbTestHooks.readConfig({
+        ADV_ARB_HARD_STOP_LOSS_CENTS: "0.04",
+      }),
+    });
+
+    expect(exit?.reason).toBe("hard stop-loss");
   });
 
   test("prefers gap retrace stop after confirmation", () => {
@@ -186,8 +254,8 @@ describe("advantage-arb risk exits", () => {
       stats: statsWith(),
     });
 
-    expect(exit?.reason).toBe("gap retrace stop-loss");
-    expect(exit?.mode).toBe("gap-retrace");
+    expect(exit?.reason).toBe("hard stop-loss");
+    expect(exit?.mode).toBe("hard-price");
   });
 
   test("invalidates settlement hold when side gap rapidly deteriorates", () => {
@@ -211,5 +279,45 @@ describe("advantage-arb risk exits", () => {
 
     expect(view.holdToSettlement).toBe(false);
     expect(view.holdInvalidated).toBe(true);
+  });
+
+  test("settlement hold requires high fair probability", () => {
+    const weak = __advantageArbTestHooks.settlementView({
+      pos: { ...basePosition, peakSideGap: 20 },
+      gap: 2,
+      bid: 0.7,
+      remaining: 20,
+      atr: 0.5,
+      stats: statsWith({
+        gapVelocityEma: 0.1,
+        gapVelocityHistory: [0.2, 0.1, 0.1, 0.2],
+        gapChangePerSecondHistory: [1.8, -1.4, 1.6, -1.2, 1.5, -1.3],
+      }),
+      now: 12_000,
+    });
+    const strong = __advantageArbTestHooks.settlementView({
+      pos: { ...basePosition, peakSideGap: 20 },
+      gap: 15,
+      bid: 0.7,
+      remaining: 20,
+      atr: 0.5,
+      stats: statsWith({
+        gapVelocityEma: 0.1,
+        gapVelocityHistory: [0.2, 0.1, 0.1, 0.2],
+        gapChangePerSecondHistory: [0.4, -0.2, 0.3, -0.1, 0.2, -0.2],
+      }),
+      now: 12_000,
+    });
+
+    expect(weak.holdToSettlement).toBe(false);
+    expect(strong.holdToSettlement).toBe(true);
+  });
+
+  test("cooldown metrics reflect active cooldown state", () => {
+    __advantageArbTestHooks.applyCooldown("test-cooldown", 1);
+    const metrics = __advantageArbTestHooks.cooldownMetrics();
+
+    expect(metrics.cooldownMarketsRemaining).toBeGreaterThanOrEqual(1);
+    expect(metrics.cooldownReason).toBe("test-cooldown");
   });
 });
