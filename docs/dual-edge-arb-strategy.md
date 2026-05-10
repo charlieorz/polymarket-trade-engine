@@ -193,41 +193,56 @@ MAX_SESSION_LOSS=20
 WALLET_BALANCE=50
 ```
 
-3. 确认脚本可执行并试跑一轮：
+3. 确认专用脚本可执行并试跑一轮：
 
 ```bash
-chmod +x scripts_ops/run_sim_advantage_arb.sh
-POLY_ROUNDS=1 scripts_ops/run_sim_advantage_arb.sh
+chmod +x scripts_ops/run_sim_dual_edge_arb.sh
+POLY_ROUNDS=1 scripts_ops/run_sim_dual_edge_arb.sh
 ```
 
-4. systemd user service 示例：
+4. 安装 system service：
+
+仓库已提供 service 文件：`scripts_ops/polymarket-dual-edge-arb-sim.service`。复制到 `/etc/systemd/system/` 后即可用普通 systemctl 管理：
+
+```bash
+sudo cp scripts_ops/polymarket-dual-edge-arb-sim.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable polymarket-dual-edge-arb-sim.service
+sudo systemctl start polymarket-dual-edge-arb-sim.service
+```
+
+service 内容如下：
 
 ```ini
 [Unit]
 Description=Polymarket dual-edge-arb simulation
+Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
+User=poly
+Group=poly
 WorkingDirectory=/home/poly/polymarket-trade-engine
 Environment=APP_DIR=/home/poly/polymarket-trade-engine
 Environment=ENV_FILE=/home/poly/polymarket-trade-engine/.env.sim
+Environment=BUN_EXECUTABLE=/home/poly/.bun/bin/bun
 Environment=PATH=/home/poly/.bun/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/poly/polymarket-trade-engine/scripts_ops/run_sim_advantage_arb.sh
+ExecStart=/home/poly/polymarket-trade-engine/scripts_ops/run_sim_dual_edge_arb.sh
 Restart=always
 RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 ```
 
 5. 启动和查看日志：
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now polymarket-dual-edge-arb-sim.service
-systemctl --user status polymarket-dual-edge-arb-sim.service
-journalctl --user -u polymarket-dual-edge-arb-sim.service -f
+sudo systemctl status polymarket-dual-edge-arb-sim.service
+sudo journalctl -u polymarket-dual-edge-arb-sim.service -f
 ```
 
 6. 拉回服务器日志后，本地复盘：
@@ -237,4 +252,4 @@ rsync -av poly@server:/home/poly/polymarket-trade-engine/logs/ logs/
 bun run scripts/analyze-dual-edge-arb-logs.ts --log-dir logs
 ```
 
-如果 systemd 报 `/usr/bin/env: 'bun': No such file or directory`，用 `command -v bun` 找到服务器上的绝对路径，并把 service 里的 `PATH` 或脚本里的 Bun 路径改成实际值。
+如果 systemd 报 `BUN_EXECUTABLE is not executable` 或 `status 127`，在服务器运行 `command -v bun`，然后把 service 里的 `Environment=BUN_EXECUTABLE=...` 改成实际路径。
