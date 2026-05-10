@@ -59,8 +59,12 @@ const MIN_PROFIT = parseFloat(process.env.ADV_ARB_MIN_PROFIT ?? "0.08");
 const TAKE_PROFIT_BUFFER = parseFloat(
   process.env.ADV_ARB_TAKE_PROFIT_BUFFER ?? "0.02",
 );
+const MAX_PRICE_LOSS = parseFloat(process.env.ADV_ARB_MAX_PRICE_LOSS ?? "0.12");
 const MAX_TAKE_PROFIT_PRICE = parseFloat(
   process.env.ADV_ARB_MAX_TAKE_PROFIT_PRICE ?? "0.96",
+);
+const TAKE_PROFIT_MIN_BID_LIQUIDITY = parseFloat(
+  process.env.ADV_ARB_TAKE_PROFIT_MIN_BID_LIQUIDITY ?? String(SHARES),
 );
 const TAKE_PROFIT_PEAK_EXPANSION_RATIO = parseFloat(
   process.env.ADV_ARB_TAKE_PROFIT_PEAK_EXPANSION_RATIO ?? "1.2",
@@ -145,7 +149,18 @@ function bestAsk(ctx: StrategyContext, side: Side) {
 }
 
 function bestBid(ctx: StrategyContext, side: Side): number | null {
-  return ctx.orderBook.bestBidPrice(side);
+  return bestBidInfo(ctx, side)?.price ?? null;
+}
+
+function bestBidInfo(ctx: StrategyContext, side: Side) {
+  return ctx.orderBook.bestBidInfo(side);
+}
+
+function plannedStopLossPrice(entryAsk: number): number {
+  return Math.max(
+    STOP_LOSS_PRICE,
+    parseFloat((entryAsk - MAX_PRICE_LOSS).toFixed(2)),
+  );
 }
 
 function settlementView(params: {
@@ -204,7 +219,8 @@ function buildMetrics(params: {
     params;
   const activeSide = side ?? position?.side ?? null;
   const ask = activeSide ? bestAsk(ctx, activeSide) : null;
-  const bid = activeSide ? bestBid(ctx, activeSide) : null;
+  const bidInfo = activeSide ? bestBidInfo(ctx, activeSide) : null;
+  const bid = bidInfo?.price ?? null;
   const absGap = gap === null ? null : Math.abs(gap);
   const settlement =
     position && gap !== null
@@ -228,6 +244,7 @@ function buildMetrics(params: {
     bestAsk: ask?.price ?? null,
     bestAskLiquidity: ask?.liquidity ?? null,
     bestBid: bid,
+    bestBidLiquidity: bidInfo?.liquidity ?? null,
     entryPrice: position?.entryPrice ?? null,
     entryGap: position?.entryGap ?? null,
     entryAbsGap: position?.entryAbsGap ?? null,
@@ -307,7 +324,7 @@ function checkEntry(params: {
       MAX_TAKE_PROFIT_PRICE,
       parseFloat((ask.price + MIN_PROFIT + TAKE_PROFIT_BUFFER).toFixed(2)),
     ),
-    stopLossPrice: STOP_LOSS_PRICE,
+    stopLossPrice: plannedStopLossPrice(ask.price),
   };
 }
 
@@ -370,10 +387,11 @@ function shouldTakeProfit(params: {
   pos: Position;
   gap: number;
   bid: number | null;
+  bidLiquidity: number | null;
   remaining: number;
   stats: EdgeStats;
 }): { price: number; reason: string } | null {
-  const { pos, gap, bid, remaining, stats } = params;
+  const { pos, gap, bid, bidLiquidity, remaining, stats } = params;
   if (bid === null) return null;
 
   const settlement = settlementView({
@@ -390,13 +408,19 @@ function shouldTakeProfit(params: {
   const currentSideGap = sideGap(pos.side, gap);
   const hasMinimumProfit = bid >= pos.entryPrice + MIN_PROFIT;
   const reachedPlannedProfit = bid >= pos.takeProfitPrice;
+  const hasExecutableBid =
+    bidLiquidity === null || bidLiquidity >= TAKE_PROFIT_MIN_BID_LIQUIDITY;
   const expandedEnough =
     pos.peakSideGap >= pos.entryAbsGap * TAKE_PROFIT_PEAK_EXPANSION_RATIO;
   const retracedFromPeak =
     expandedEnough && currentSideGap <= pos.peakSideGap * TAKE_PROFIT_TRAIL_RATIO;
 
-  // 止盈不再是“到固定价就卖”。优势仍在扩大时，固定目标价只是一个
-  // 最低收益门槛；真正卖出要等优势从峰值回落，或者临近尾盘需要锁定利润。
+  if (hasMinimumProfit && reachedPlannedProfit && hasExecutableBid) {
+    return { price: bid, reason: "planned take-profit" };
+  }
+
+  // 计划止盈优先锁定已经出现的正收益；如果顶层 bid 流动性不足，
+  // 再退回到优势回撤和尾盘锁利，避免为了几股薄流动性过早放弃大趋势。
   if (hasMinimumProfit && retracedFromPeak) {
     return { price: bid, reason: "trailing take-profit" };
   }
@@ -461,6 +485,9 @@ function shouldEarlyStopLoss(params: {
   if (settlement.holdToSettlement) return null;
 
   const edge = markAdverseState(pos, gap, now);
+  if (bid !== null && bid <= pos.stopLossPrice && edge.holdMs >= MIN_HOLD_MS) {
+    return { price: bid, reason: "price stop-loss", edge };
+  }
   if (!edge.confirmed) return null;
 
   const fallbackPrice = Math.max(0.01, Math.min(pos.stopLossPrice, pos.entryPrice - 0.01));
@@ -509,6 +536,7 @@ function placeSell(params: {
   } = params;
   if (state.closing) return;
   state.closing = true;
+  const resolvedExpireAtMs = expireAtMs ?? ctx.slotEndMs;
 
   // 每一次卖出都先记录一个策略信号，图片会把该信号点画成浅色标记；
   // 随后的 SELL order 会通过 signalId 关联到真实确认点，便于比较策略
@@ -528,7 +556,7 @@ function placeSell(params: {
         price,
         shares: pos.shares,
       },
-      expireAtMs: expireAtMs ?? ctx.slotEndMs - 30_000,
+      expireAtMs: resolvedExpireAtMs,
       analysis: {
         signalId,
         label,
@@ -561,7 +589,9 @@ function placeSell(params: {
           `[${ctx.slug}] advantage-arb: SELL ${pos.side} failed (${reasonText})`,
           "red",
         );
-        state.closing = false;
+        if (!reasonText.includes("order expired before placement")) {
+          state.closing = false;
+        }
       },
     },
   ]);
@@ -734,7 +764,8 @@ export const advantageArb: Strategy = async (ctx) => {
     const pos = state.position;
     if (!pos || state.closing) return;
 
-    const bid = bestBid(ctx, pos.side);
+    const bidInfo = bestBidInfo(ctx, pos.side);
+    const bid = bidInfo?.price ?? null;
     const ask = bestAsk(ctx, pos.side)?.price ?? null;
     updatePositionEdge(pos, gap, bid);
     const metrics = () =>
@@ -753,6 +784,7 @@ export const advantageArb: Strategy = async (ctx) => {
       pos,
       gap,
       bid,
+      bidLiquidity: bidInfo?.liquidity ?? null,
       remaining,
       stats,
     });
@@ -894,4 +926,10 @@ export const advantageArb: Strategy = async (ctx) => {
   return () => {
     clearInterval(tickInterval);
   };
+};
+
+export const __advantageArbTestHooks = {
+  plannedStopLossPrice,
+  shouldTakeProfit,
+  shouldEarlyStopLoss,
 };

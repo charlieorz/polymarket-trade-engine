@@ -104,6 +104,7 @@ describe("trade window image renderer", () => {
     expect(svg).toContain("PnL +$0.50");
     expect(svg).toContain("策略识别指标");
     expect(svg).toContain("订单确认指标");
+    expect(svg).toContain("Noto Sans CJK SC");
     expect(svg).not.toContain("浅色圆点");
 
     expect(outPath).toBe(

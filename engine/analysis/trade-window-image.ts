@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { delimiter, join } from "path";
 import { Resvg } from "@resvg/resvg-js";
 import { slotFromSlug } from "../../utils/slot.ts";
 
@@ -72,6 +72,44 @@ const METRIC_PRIORITY = [
   "plannedTakeProfit",
   "plannedStopLoss",
 ];
+
+const SVG_FONT_FAMILY =
+  "'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC', 'PingFang SC', " +
+  "'Microsoft YaHei', 'WenQuanYi Zen Hei', STHeiti, Arial, sans-serif";
+
+const CJK_FONT_CANDIDATES = [
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+  "/usr/share/fonts/opentype/adobe-source-han-sans/SourceHanSansSC-Regular.otf",
+  "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
+  "/System/Library/Fonts/STHeiti Medium.ttc",
+  "/System/Library/Fonts/PingFang.ttc",
+  "/Library/Fonts/Arial Unicode.ttf",
+];
+
+function splitFontPaths(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(new RegExp(`[${delimiter},]`))
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function existingUnique(paths: string[]): string[] {
+  return [...new Set(paths)].filter((fontPath) => existsSync(fontPath));
+}
+
+function cjkFontFiles(): string[] {
+  return existingUnique([
+    ...splitFontPaths(process.env.TRADE_WINDOW_FONT_FILES),
+    ...splitFontPaths(process.env.TRADE_WINDOW_FONT_FILE),
+    ...splitFontPaths(process.env.CJK_FONT_FILES),
+    ...splitFontPaths(process.env.CJK_FONT_FILE),
+    ...CJK_FONT_CANDIDATES,
+  ]);
+}
 
 function parseAllJson(text: string): LogEntry[] {
   const results: LogEntry[] = [];
@@ -498,7 +536,7 @@ export function buildTradeWindowSvgFromLog(
   });
 
   return `
-  <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${esc(SVG_FONT_FAMILY)}">
     <rect width="100%" height="100%" fill="#10161c"/>
     <text x="72" y="70" fill="#f8fafc" font-size="42" font-weight="800">${esc(slug)}</text>
     <text x="72" y="112" fill="#8b98a8" font-size="25">${esc(strategyName)}</text>
@@ -533,9 +571,15 @@ export function renderTradeWindowImageFromLog(
   const dir = join(outputRoot, safeName(opts.strategyName || "unknown"));
   mkdirSync(dir, { recursive: true });
   const outPath = join(dir, `${safeName(opts.slug)}.png`);
+  const fontFiles = cjkFontFiles();
   const png = new Resvg(svg, {
     fitTo: { mode: "width", value: 1600 },
-    font: { loadSystemFonts: true },
+    font: {
+      loadSystemFonts: true,
+      fontFiles,
+      defaultFontFamily: "Noto Sans CJK SC",
+      sansSerifFamily: "Noto Sans CJK SC",
+    },
   })
     .render()
     .asPng();
