@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "fs";
 import { delimiter, join } from "path";
 import { Resvg } from "@resvg/resvg-js";
 import { slotFromSlug } from "../../utils/slot.ts";
@@ -60,8 +60,24 @@ const METRIC_PRIORITY = [
   "settlementRequiredGap",
   "gapRetainRatio",
   "peakRetainRatio",
+  "entryRetainRatio",
   "atr",
+  "atrPeriod",
+  "gapAtr",
   "gapVelocity",
+  "sideGapVelocity",
+  "sideGapVelocityEma",
+  "entrySignalStrength",
+  "requiredAbsGap",
+  "requiredSignalStrength",
+  "trendConsistency",
+  "signFlipCount",
+  "peakSideGapSeen",
+  "currentSideGap",
+  "entryRejectedReason",
+  "takeProfitMode",
+  "stopLossMode",
+  "timeBlockedReason",
   "bestAsk",
   "bestBid",
   "entryPrice",
@@ -101,12 +117,38 @@ function existingUnique(paths: string[]): string[] {
   return [...new Set(paths)].filter((fontPath) => existsSync(fontPath));
 }
 
+function fontFilesFromDirs(value: string | undefined): string[] {
+  const out: string[] = [];
+  const dirs = splitFontPaths(value);
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fontPath = join(dir, entry);
+      try {
+        if (!statSync(fontPath).isFile()) continue;
+      } catch {
+        continue;
+      }
+      if (/\.(ttf|ttc|otf)$/i.test(entry)) out.push(fontPath);
+    }
+  }
+  return out;
+}
+
 function cjkFontFiles(): string[] {
   return existingUnique([
     ...splitFontPaths(process.env.TRADE_WINDOW_FONT_FILES),
     ...splitFontPaths(process.env.TRADE_WINDOW_FONT_FILE),
     ...splitFontPaths(process.env.CJK_FONT_FILES),
     ...splitFontPaths(process.env.CJK_FONT_FILE),
+    ...fontFilesFromDirs(process.env.TRADE_WINDOW_FONT_DIRS),
+    ...fontFilesFromDirs(process.env.CJK_FONT_DIRS),
     ...CJK_FONT_CANDIDATES,
   ]);
 }
@@ -572,6 +614,13 @@ export function renderTradeWindowImageFromLog(
   mkdirSync(dir, { recursive: true });
   const outPath = join(dir, `${safeName(opts.slug)}.png`);
   const fontFiles = cjkFontFiles();
+  if (fontFiles.length === 0) {
+    console.warn(
+      "[trade-window-image] No CJK font files found. Install fonts-noto-cjk or set TRADE_WINDOW_FONT_FILE(S)/TRADE_WINDOW_FONT_DIRS.",
+    );
+  } else if (process.env.TRADE_WINDOW_FONT_DEBUG === "1") {
+    console.warn(`[trade-window-image] CJK font files: ${fontFiles.join(", ")}`);
+  }
   const png = new Resvg(svg, {
     fitTo: { mode: "width", value: 1600 },
     font: {

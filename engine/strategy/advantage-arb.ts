@@ -18,6 +18,9 @@ type Position = {
   peakSideGap: number;
   peakBid: number | null;
   adverseSinceMs: number | null;
+  velocityAdverseSinceMs: number | null;
+  settlementInvalidSinceMs: number | null;
+  riskExitAttempts: number;
 };
 
 type State = {
@@ -30,16 +33,23 @@ type State = {
 
 type EdgeStats = {
   atr: number | null;
+  gapAtr: number | null;
   gapVelocity: number | null;
+  gapVelocityEma: number | null;
   lastPrice: number | null;
   lastGap: number | null;
   lastUpdateMs: number;
+  gapVelocityHistory: number[];
+  peakSideGapBySide: Record<Side, number>;
+  peakSignalStrengthBySide: Record<Side, number>;
+  weakTrendSinceMsBySide: Record<Side, number | null>;
 };
 
 type SettlementView = {
   currentSideGap: number;
   requiredSideGap: number;
   holdToSettlement: boolean;
+  holdInvalidated: boolean;
   settlementProfit: number;
   exitProfit: number | null;
   settlementUpside: number | null;
@@ -48,6 +58,114 @@ type SettlementView = {
 const SHARES = 6;
 const MIN_ENTRY_REMAINING = 75;
 const MAX_ENTRY_REMAINING = 240;
+const EPSILON = 1e-9;
+
+type AdvantageArbConfig = {
+  tickIntervalMs: number;
+  statsIntervalMs: number;
+  atrPeriod: number;
+  gapAtrPeriod: number;
+  velocityEmaPeriod: number;
+  trendLookback: number;
+  noEntryFirstSeconds: number;
+  noEntryLastSeconds: number;
+  minEntrySignalStrength: number;
+  minEntryPeakRetainRatio: number;
+  entryWeakTrendConfirmMs: number;
+  gapAwareTakeProfitEnabled: boolean;
+  takeProfitDelayMinTrendConsistency: number;
+  takeProfitDelayMinPeakRetainRatio: number;
+  takeProfitDelayMinSideVelocityEma: number;
+  settlementInvalidateRetainRatio: number;
+  settlementInvalidateVelocityEma: number;
+  settlementInvalidateConfirmMs: number;
+  riskExitOrderTtlMs: number;
+  riskExitMaxRetries: number;
+  stopNegativeVelocityEma: number;
+  stopVelocityConfirmMs: number;
+};
+
+function parseNumberEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+  fallback: number,
+): number {
+  const value = env[key];
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseBooleanEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const value = env[key];
+  if (value === undefined || value.trim() === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function readConfig(env: Record<string, string | undefined> = process.env): AdvantageArbConfig {
+  return {
+    tickIntervalMs: Math.max(50, parseNumberEnv(env, "ADV_ARB_TICK_INTERVAL_MS", 200)),
+    statsIntervalMs: Math.max(100, parseNumberEnv(env, "ADV_ARB_STATS_INTERVAL_MS", 1000)),
+    atrPeriod: Math.max(2, parseNumberEnv(env, "ADV_ARB_ATR_PERIOD", 14)),
+    gapAtrPeriod: Math.max(2, parseNumberEnv(env, "ADV_ARB_GAP_ATR_PERIOD", 14)),
+    velocityEmaPeriod: Math.max(2, parseNumberEnv(env, "ADV_ARB_VELOCITY_EMA_PERIOD", 5)),
+    trendLookback: Math.max(2, Math.floor(parseNumberEnv(env, "ADV_ARB_TREND_LOOKBACK", 6))),
+    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "ADV_ARB_NO_ENTRY_FIRST_SECONDS", 5)),
+    noEntryLastSeconds: Math.max(0, parseNumberEnv(env, "ADV_ARB_NO_ENTRY_LAST_SECONDS", 45)),
+    minEntrySignalStrength: Math.max(0, parseNumberEnv(env, "ADV_ARB_MIN_ENTRY_SIGNAL_STRENGTH", 0)),
+    minEntryPeakRetainRatio: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_MIN_ENTRY_PEAK_RETAIN_RATIO", 0.78)),
+    ),
+    entryWeakTrendConfirmMs: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_ENTRY_WEAK_TREND_CONFIRM_MS", 2000),
+    ),
+    gapAwareTakeProfitEnabled: parseBooleanEnv(env, "ADV_ARB_GAP_AWARE_TP_ENABLED", true),
+    takeProfitDelayMinTrendConsistency: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_TP_DELAY_MIN_TREND_CONSISTENCY", 0.67)),
+    ),
+    takeProfitDelayMinPeakRetainRatio: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_TP_DELAY_MIN_PEAK_RETAIN_RATIO", 0.85)),
+    ),
+    takeProfitDelayMinSideVelocityEma: parseNumberEnv(
+      env,
+      "ADV_ARB_TP_DELAY_MIN_SIDE_VELOCITY_EMA",
+      0,
+    ),
+    settlementInvalidateRetainRatio: Math.max(
+      0,
+      Math.min(1, parseNumberEnv(env, "ADV_ARB_SETTLEMENT_INVALIDATE_RETAIN_RATIO", 0.55)),
+    ),
+    settlementInvalidateVelocityEma: parseNumberEnv(
+      env,
+      "ADV_ARB_SETTLEMENT_INVALIDATE_VELOCITY_EMA",
+      -0.5,
+    ),
+    settlementInvalidateConfirmMs: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_SETTLEMENT_INVALIDATE_CONFIRM_MS", 1500),
+    ),
+    riskExitOrderTtlMs: Math.max(250, parseNumberEnv(env, "ADV_ARB_RISK_EXIT_ORDER_TTL_MS", 5000)),
+    riskExitMaxRetries: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "ADV_ARB_RISK_EXIT_MAX_RETRIES", 3)),
+    ),
+    stopNegativeVelocityEma: parseNumberEnv(env, "ADV_ARB_STOP_NEGATIVE_VELOCITY_EMA", -0.5),
+    stopVelocityConfirmMs: Math.max(
+      0,
+      parseNumberEnv(env, "ADV_ARB_STOP_VELOCITY_CONFIRM_MS", 2000),
+    ),
+  };
+}
+
+const CONFIG = readConfig();
 const MIN_ABS_GAP = parseFloat(process.env.ADV_ARB_MIN_ABS_GAP ?? "8");
 const ENTRY_ATR_MULTIPLIER = parseFloat(
   process.env.ADV_ARB_ENTRY_ATR_MULTIPLIER ?? "6",
@@ -117,15 +235,51 @@ const EARLY_STOP_MAX_POSITIVE_SIDE_GAP = parseFloat(
 );
 const MIN_HOLD_MS = parseFloat(process.env.ADV_ARB_MIN_HOLD_MS ?? "3000");
 
-function updateStats(stats: EdgeStats, price: number, gap: number): void {
-  const now = Date.now();
-  if (now - stats.lastUpdateMs < 1000) return;
+function ema(previous: number | null, value: number, period: number): number {
+  return previous === null ? value : (previous * (period - 1) + value) / period;
+}
+
+function createEdgeStats(): EdgeStats {
+  return {
+    atr: null,
+    gapAtr: null,
+    gapVelocity: null,
+    gapVelocityEma: null,
+    lastPrice: null,
+    lastGap: null,
+    lastUpdateMs: 0,
+    gapVelocityHistory: [],
+    peakSideGapBySide: { UP: 0, DOWN: 0 },
+    peakSignalStrengthBySide: { UP: 0, DOWN: 0 },
+    weakTrendSinceMsBySide: { UP: null, DOWN: null },
+  };
+}
+
+function updateStats(
+  stats: EdgeStats,
+  price: number,
+  gap: number,
+  now = Date.now(),
+  config = CONFIG,
+): void {
+  if (now - stats.lastUpdateMs < config.statsIntervalMs) return;
   if (stats.lastPrice !== null) {
     const tr = Math.abs(price - stats.lastPrice);
-    stats.atr = stats.atr === null ? tr : (stats.atr * 13 + tr) / 14;
+    stats.atr = ema(stats.atr, tr, config.atrPeriod);
   }
   if (stats.lastGap !== null) {
-    stats.gapVelocity = gap - stats.lastGap;
+    const gapVelocity = gap - stats.lastGap;
+    stats.gapVelocity = gapVelocity;
+    stats.gapVelocityEma = ema(
+      stats.gapVelocityEma,
+      gapVelocity,
+      config.velocityEmaPeriod,
+    );
+    stats.gapAtr = ema(stats.gapAtr, Math.abs(gapVelocity), config.gapAtrPeriod);
+    stats.gapVelocityHistory.push(gapVelocity);
+    if (stats.gapVelocityHistory.length > config.trendLookback) {
+      stats.gapVelocityHistory.shift();
+    }
   }
   stats.lastPrice = price;
   stats.lastGap = gap;
@@ -138,6 +292,190 @@ function advantageSide(gap: number): Side {
 
 function sideGap(side: Side, gap: number): number {
   return side === "UP" ? gap : -gap;
+}
+
+function sideGapVelocity(side: Side, gapVelocity: number | null): number | null {
+  if (gapVelocity === null) return null;
+  return side === "UP" ? gapVelocity : -gapVelocity;
+}
+
+function sideGapVelocityEma(stats: EdgeStats, side: Side): number | null {
+  return sideGapVelocity(side, stats.gapVelocityEma);
+}
+
+function trendConsistency(stats: EdgeStats, side: Side): number | null {
+  if (stats.gapVelocityHistory.length === 0) return null;
+  let useful = 0;
+  let nonZero = 0;
+  for (const v of stats.gapVelocityHistory) {
+    if (Math.abs(v) <= EPSILON) continue;
+    nonZero++;
+    const sideVelocity = side === "UP" ? v : -v;
+    if (sideVelocity > 0) useful++;
+  }
+  return nonZero === 0 ? null : useful / nonZero;
+}
+
+function signFlipCount(stats: EdgeStats): number {
+  let previous = 0;
+  let flips = 0;
+  for (const v of stats.gapVelocityHistory) {
+    const sign = Math.abs(v) <= EPSILON ? 0 : v > 0 ? 1 : -1;
+    if (sign === 0) continue;
+    if (previous !== 0 && sign !== previous) flips++;
+    previous = sign;
+  }
+  return flips;
+}
+
+function computeEntrySignalStrength(absGap: number, atr: number | null): number | null {
+  if (atr === null) return null;
+  const denominator = Math.max(Math.abs(atr), EPSILON);
+  return parseFloat((absGap / denominator).toFixed(4));
+}
+
+function canEnterByTime(params: {
+  now: number;
+  slotStartMs: number;
+  slotEndMs: number;
+  remaining: number;
+  config?: AdvantageArbConfig;
+}): {
+  allowed: boolean;
+  reason: string | null;
+  elapsedSeconds: number;
+  remainingSeconds: number;
+} {
+  const config = params.config ?? CONFIG;
+  const elapsedSeconds = Math.max(0, (params.now - params.slotStartMs) / 1000);
+  const remainingSeconds = Math.max(0, (params.slotEndMs - params.now) / 1000);
+  if (elapsedSeconds < config.noEntryFirstSeconds) {
+    return {
+      allowed: false,
+      reason: "first-window-block",
+      elapsedSeconds,
+      remainingSeconds,
+    };
+  }
+  if (remainingSeconds < config.noEntryLastSeconds) {
+    return {
+      allowed: false,
+      reason: "last-window-block",
+      elapsedSeconds,
+      remainingSeconds,
+    };
+  }
+  if (params.remaining < MIN_ENTRY_REMAINING) {
+    return {
+      allowed: false,
+      reason: "min-entry-remaining-block",
+      elapsedSeconds,
+      remainingSeconds,
+    };
+  }
+  if (params.remaining > MAX_ENTRY_REMAINING) {
+    return {
+      allowed: false,
+      reason: "max-entry-remaining-block",
+      elapsedSeconds,
+      remainingSeconds,
+    };
+  }
+  return { allowed: true, reason: null, elapsedSeconds, remainingSeconds };
+}
+
+function updateEntryPeaks(
+  stats: EdgeStats,
+  side: Side,
+  currentSideGap: number,
+  entrySignalStrength: number | null,
+): { peakSideGap: number; peakSignalStrength: number } {
+  const peakSideGap = Math.max(stats.peakSideGapBySide[side] ?? 0, currentSideGap);
+  stats.peakSideGapBySide[side] = peakSideGap;
+  if (entrySignalStrength !== null) {
+    stats.peakSignalStrengthBySide[side] = Math.max(
+      stats.peakSignalStrengthBySide[side] ?? 0,
+      entrySignalStrength,
+    );
+  }
+  return {
+    peakSideGap,
+    peakSignalStrength: stats.peakSignalStrengthBySide[side] ?? 0,
+  };
+}
+
+function detectAntiRetraceEntry(params: {
+  stats: EdgeStats;
+  side: Side;
+  currentSideGap: number;
+  entrySignalStrength: number | null;
+  now: number;
+  config?: AdvantageArbConfig;
+}): {
+  allowed: boolean;
+  reason: string | null;
+  peakSideGap: number;
+  peakRetainRatio: number | null;
+  entryRetainRatio: number | null;
+} {
+  const config = params.config ?? CONFIG;
+  const { peakSideGap, peakSignalStrength } = updateEntryPeaks(
+    params.stats,
+    params.side,
+    params.currentSideGap,
+    params.entrySignalStrength,
+  );
+  const peakRetainRatio =
+    peakSideGap > 0 ? params.currentSideGap / peakSideGap : null;
+  const entryRetainRatio =
+    params.entrySignalStrength !== null && peakSignalStrength > 0
+      ? params.entrySignalStrength / peakSignalStrength
+      : null;
+  const velocityEma = sideGapVelocityEma(params.stats, params.side);
+  const consistency = trendConsistency(params.stats, params.side);
+  const weak = velocityEma !== null && velocityEma < 0;
+  if (weak) {
+    params.stats.weakTrendSinceMsBySide[params.side] ??= params.now;
+  } else {
+    params.stats.weakTrendSinceMsBySide[params.side] = null;
+  }
+  const weakSince = params.stats.weakTrendSinceMsBySide[params.side];
+  const weakConfirmed =
+    weakSince !== null && params.now - weakSince >= config.entryWeakTrendConfirmMs;
+  const trendRecovered =
+    velocityEma !== null &&
+    velocityEma >= 0 &&
+    (consistency === null || consistency >= 0.5);
+
+  if (weakConfirmed) {
+    return {
+      allowed: false,
+      reason: "weak-side-gap-velocity",
+      peakSideGap,
+      peakRetainRatio,
+      entryRetainRatio,
+    };
+  }
+  if (
+    peakRetainRatio !== null &&
+    peakRetainRatio < config.minEntryPeakRetainRatio &&
+    !trendRecovered
+  ) {
+    return {
+      allowed: false,
+      reason: "entry-peak-retrace",
+      peakSideGap,
+      peakRetainRatio,
+      entryRetainRatio,
+    };
+  }
+  return {
+    allowed: true,
+    reason: null,
+    peakSideGap,
+    peakRetainRatio,
+    entryRetainRatio,
+  };
 }
 
 function sideToken(ctx: StrategyContext, side: Side): string {
@@ -169,8 +507,12 @@ function settlementView(params: {
   bid: number | null;
   remaining: number;
   atr: number | null;
+  stats?: EdgeStats;
+  now?: number;
+  config?: AdvantageArbConfig;
 }): SettlementView {
   const { pos, gap, bid, remaining, atr } = params;
+  const config = params.config ?? CONFIG;
   const currentSideGap = sideGap(pos.side, gap);
   const baseRequired = Math.max(
     SETTLEMENT_MIN_SIDE_GAP,
@@ -193,11 +535,34 @@ function settlementView(params: {
     remaining <= SETTLEMENT_HOLD_MAX_REMAINING &&
     currentSideGap >= requiredSideGap &&
     (bid === null || bid < SETTLEMENT_EXIT_MIN_BID);
+  const peakRetainRatio =
+    pos.peakSideGap > 0 ? currentSideGap / pos.peakSideGap : null;
+  const sideVelocityEma = params.stats
+    ? sideGapVelocityEma(params.stats, pos.side)
+    : null;
+  const invalidating =
+    holdToSettlement &&
+    ((peakRetainRatio !== null &&
+      peakRetainRatio < config.settlementInvalidateRetainRatio) ||
+      (sideVelocityEma !== null &&
+        sideVelocityEma <= config.settlementInvalidateVelocityEma));
+  if (!holdToSettlement || !invalidating) {
+    pos.settlementInvalidSinceMs = null;
+  } else if (params.now !== undefined && pos.settlementInvalidSinceMs === null) {
+    pos.settlementInvalidSinceMs = params.now;
+  }
+  const holdInvalidated =
+    holdToSettlement &&
+    invalidating &&
+    params.now !== undefined &&
+    pos.settlementInvalidSinceMs !== null &&
+    params.now - pos.settlementInvalidSinceMs >= config.settlementInvalidateConfirmMs;
 
   return {
     currentSideGap,
     requiredSideGap,
-    holdToSettlement,
+    holdToSettlement: holdToSettlement && !holdInvalidated,
+    holdInvalidated,
     settlementProfit,
     exitProfit,
     settlementUpside,
@@ -230,8 +595,27 @@ function buildMetrics(params: {
           bid,
           remaining,
           atr: stats.atr,
+          stats,
+          now: Date.now(),
         })
       : null;
+  const activeSideVelocity = activeSide
+    ? sideGapVelocity(activeSide, stats.gapVelocity)
+    : null;
+  const activeSideVelocityEma = activeSide
+    ? sideGapVelocityEma(stats, activeSide)
+    : null;
+  const activeTrendConsistency = activeSide
+    ? trendConsistency(stats, activeSide)
+    : null;
+  const activeCurrentSideGap =
+    activeSide && gap !== null ? sideGap(activeSide, gap) : null;
+  const activePeakSideGap =
+    activeSide !== null ? stats.peakSideGapBySide[activeSide] : 0;
+  const activePeakSignalStrength =
+    activeSide !== null ? stats.peakSignalStrengthBySide[activeSide] : 0;
+  const entrySignalStrength =
+    absGap === null ? null : computeEntrySignalStrength(absGap, stats.atr);
   return {
     remaining,
     btcPrice,
@@ -240,7 +624,23 @@ function buildMetrics(params: {
     absGap,
     side: activeSide,
     atr: stats.atr,
+    atrPeriod: CONFIG.atrPeriod,
+    gapAtr: stats.gapAtr,
     gapVelocity: stats.gapVelocity,
+    sideGapVelocity: activeSideVelocity,
+    sideGapVelocityEma: activeSideVelocityEma,
+    trendConsistency:
+      activeTrendConsistency === null
+        ? null
+        : parseFloat(activeTrendConsistency.toFixed(4)),
+    signFlipCount: signFlipCount(stats),
+    entrySignalStrength,
+    peakSideGapSeen: activePeakSideGap || null,
+    peakSignalStrengthSeen: activePeakSignalStrength || null,
+    currentSideGap:
+      position && gap !== null
+        ? sideGap(position.side, gap)
+        : activeCurrentSideGap,
     bestAsk: ask?.price ?? null,
     bestAskLiquidity: ask?.liquidity ?? null,
     bestBid: bid,
@@ -248,9 +648,9 @@ function buildMetrics(params: {
     entryPrice: position?.entryPrice ?? null,
     entryGap: position?.entryGap ?? null,
     entryAbsGap: position?.entryAbsGap ?? null,
-    currentSideGap: position && gap !== null ? sideGap(position.side, gap) : null,
     peakSideGap: position?.peakSideGap ?? null,
     settlementHold: settlement?.holdToSettlement ?? null,
+    settlementHoldInvalidated: settlement?.holdInvalidated ?? null,
     settlementRequiredGap: settlement?.requiredSideGap ?? null,
     settlementProfit: settlement?.settlementProfit ?? null,
     exitProfit: settlement?.exitProfit ?? null,
@@ -268,6 +668,8 @@ function buildMetrics(params: {
     stopLossPrice: position?.stopLossPrice ?? null,
     unrealizedEdge:
       position && bid !== null ? parseFloat((bid - position.entryPrice).toFixed(4)) : null,
+    tickIntervalMs: CONFIG.tickIntervalMs,
+    statsIntervalMs: CONFIG.statsIntervalMs,
     ...params.extra,
   };
 }
@@ -279,6 +681,8 @@ function checkEntry(params: {
   priceToBeat: number;
   gap: number;
   stats: EdgeStats;
+  now: number;
+  config?: AdvantageArbConfig;
 }):
   | {
       side: Side;
@@ -286,31 +690,64 @@ function checkEntry(params: {
       liquidity: number;
       entryAbsGap: number;
       requiredAbsGap: number;
+      entrySignalStrength: number | null;
+      requiredSignalStrength: number;
+      peakSideGap: number;
+      peakRetainRatio: number | null;
+      entryRetainRatio: number | null;
       takeProfitPrice: number;
       stopLossPrice: number;
     }
   | null {
   const { ctx, remaining, gap, stats } = params;
-  if (remaining < MIN_ENTRY_REMAINING || remaining > MAX_ENTRY_REMAINING) {
+  const config = params.config ?? CONFIG;
+  const time = canEnterByTime({
+    now: params.now,
+    slotStartMs: ctx.slotStartMs,
+    slotEndMs: ctx.slotEndMs,
+    remaining,
+    config,
+  });
+  if (!time.allowed) {
     return null;
   }
 
   const side = advantageSide(gap);
-  const ask = bestAsk(ctx, side);
-  if (!ask) return null;
-
   const absGap = Math.abs(gap);
   const requiredAbsGap = Math.max(
     MIN_ABS_GAP,
     stats.atr !== null ? stats.atr * ENTRY_ATR_MULTIPLIER : MIN_ABS_GAP,
   );
+  const entrySignalStrength = computeEntrySignalStrength(absGap, stats.atr);
+  const currentSideGap = sideGap(side, gap);
+  const retrace = detectAntiRetraceEntry({
+    stats,
+    side,
+    currentSideGap,
+    entrySignalStrength,
+    now: params.now,
+    config,
+  });
+  const ask = bestAsk(ctx, side);
+  if (!ask) return null;
 
   const hasEnoughGap = absGap >= requiredAbsGap;
+  const hasEnoughSignal =
+    config.minEntrySignalStrength <= 0 ||
+    (entrySignalStrength !== null &&
+      entrySignalStrength >= config.minEntrySignalStrength);
   const hasUsablePrice = ask.price >= MIN_ENTRY_ASK && ask.price <= MAX_ENTRY_ASK;
   const hasRoomToProfit = ask.price + MIN_PROFIT <= MAX_TAKE_PROFIT_PRICE;
   const hasLiquidity = ask.liquidity >= MIN_LIQUIDITY;
 
-  if (!hasEnoughGap || !hasUsablePrice || !hasRoomToProfit || !hasLiquidity) {
+  if (
+    !hasEnoughGap ||
+    !hasEnoughSignal ||
+    !hasUsablePrice ||
+    !hasRoomToProfit ||
+    !hasLiquidity ||
+    !retrace.allowed
+  ) {
     return null;
   }
 
@@ -320,6 +757,11 @@ function checkEntry(params: {
     liquidity: ask.liquidity,
     entryAbsGap: absGap,
     requiredAbsGap,
+    entrySignalStrength,
+    requiredSignalStrength: config.minEntrySignalStrength,
+    peakSideGap: retrace.peakSideGap,
+    peakRetainRatio: retrace.peakRetainRatio,
+    entryRetainRatio: retrace.entryRetainRatio,
     takeProfitPrice: Math.min(
       MAX_TAKE_PROFIT_PRICE,
       parseFloat((ask.price + MIN_PROFIT + TAKE_PROFIT_BUFFER).toFixed(2)),
@@ -390,8 +832,10 @@ function shouldTakeProfit(params: {
   bidLiquidity: number | null;
   remaining: number;
   stats: EdgeStats;
-}): { price: number; reason: string } | null {
+  config?: AdvantageArbConfig;
+}): { price: number; reason: string; mode: string } | null {
   const { pos, gap, bid, bidLiquidity, remaining, stats } = params;
+  const config = params.config ?? CONFIG;
   if (bid === null) return null;
 
   const settlement = settlementView({
@@ -400,12 +844,19 @@ function shouldTakeProfit(params: {
     bid,
     remaining,
     atr: stats.atr,
+    stats,
+    now: Date.now(),
+    config,
   });
   if (settlement.holdToSettlement) {
     return null;
   }
 
   const currentSideGap = sideGap(pos.side, gap);
+  const peakRetainRatio =
+    pos.peakSideGap > 0 ? currentSideGap / pos.peakSideGap : 0;
+  const currentTrendConsistency = trendConsistency(stats, pos.side);
+  const currentSideVelocityEma = sideGapVelocityEma(stats, pos.side);
   const hasMinimumProfit = bid >= pos.entryPrice + MIN_PROFIT;
   const reachedPlannedProfit = bid >= pos.takeProfitPrice;
   const hasExecutableBid =
@@ -414,23 +865,37 @@ function shouldTakeProfit(params: {
     pos.peakSideGap >= pos.entryAbsGap * TAKE_PROFIT_PEAK_EXPANSION_RATIO;
   const retracedFromPeak =
     expandedEnough && currentSideGap <= pos.peakSideGap * TAKE_PROFIT_TRAIL_RATIO;
+  const trendStillSupports =
+    config.gapAwareTakeProfitEnabled &&
+    remaining > TAKE_PROFIT_LOCK_REMAINING &&
+    bid < TAKE_PROFIT_LOCK_BID &&
+    currentSideVelocityEma !== null &&
+    currentSideVelocityEma >= config.takeProfitDelayMinSideVelocityEma &&
+    (currentTrendConsistency === null ||
+      currentTrendConsistency >= config.takeProfitDelayMinTrendConsistency) &&
+    peakRetainRatio >= config.takeProfitDelayMinPeakRetainRatio;
 
   if (hasMinimumProfit && reachedPlannedProfit && hasExecutableBid) {
-    return { price: bid, reason: "planned take-profit" };
+    if (trendStillSupports) return null;
+    return { price: bid, reason: "planned take-profit", mode: "planned" };
   }
 
   // 计划止盈优先锁定已经出现的正收益；如果顶层 bid 流动性不足，
   // 再退回到优势回撤和尾盘锁利，避免为了几股薄流动性过早放弃大趋势。
   if (hasMinimumProfit && retracedFromPeak) {
-    return { price: bid, reason: "trailing take-profit" };
+    return { price: bid, reason: "trailing take-profit", mode: "trailing" };
   }
 
   if (remaining <= TAKE_PROFIT_LOCK_REMAINING && reachedPlannedProfit) {
-    return { price: bid, reason: "late profit lock" };
+    return { price: bid, reason: "late profit lock", mode: "late-lock" };
   }
 
   if (remaining <= 75 && bid >= TAKE_PROFIT_LOCK_BID) {
-    return { price: bid, reason: "high-probability profit lock" };
+    return {
+      price: bid,
+      reason: "high-probability profit lock",
+      mode: "high-probability-lock",
+    };
   }
 
   return null;
@@ -451,6 +916,8 @@ function shouldLastMinuteStop(params: {
     bid,
     remaining,
     atr: stats.atr,
+    stats,
+    now: Date.now(),
   });
   if (settlement.holdToSettlement) return false;
 
@@ -473,33 +940,68 @@ function shouldEarlyStopLoss(params: {
   now: number;
   remaining: number;
   stats: EdgeStats;
-}): { price: number; reason: string; edge: ReturnType<typeof markAdverseState> } | null {
+  config?: AdvantageArbConfig;
+}): {
+  price: number;
+  reason: string;
+  mode: string;
+  edge: ReturnType<typeof markAdverseState>;
+} | null {
   const { pos, gap, bid, now, remaining, stats } = params;
+  const config = params.config ?? CONFIG;
   const settlement = settlementView({
     pos,
     gap,
     bid,
     remaining,
     atr: stats.atr,
+    stats,
+    now,
+    config,
   });
   if (settlement.holdToSettlement) return null;
 
   const edge = markAdverseState(pos, gap, now);
-  if (bid !== null && bid <= pos.stopLossPrice && edge.holdMs >= MIN_HOLD_MS) {
-    return { price: bid, reason: "price stop-loss", edge };
-  }
-  if (!edge.confirmed) return null;
-
   const fallbackPrice = Math.max(0.01, Math.min(pos.stopLossPrice, pos.entryPrice - 0.01));
   const price = bid ?? fallbackPrice;
-  if (edge.isReversed) {
-    return { price, reason: "gap reversal stop-loss", edge };
+  if (settlement.holdInvalidated && edge.holdMs >= MIN_HOLD_MS) {
+    return {
+      price,
+      reason: "settlement hold invalidated",
+      mode: "settlement-invalidated",
+      edge,
+    };
   }
-  if (
-    edge.isDeepRetrace &&
-    edge.currentSideGap <= EARLY_STOP_MAX_POSITIVE_SIDE_GAP
-  ) {
-    return { price, reason: "gap retrace stop-loss", edge };
+  const velocityEma = sideGapVelocityEma(stats, pos.side);
+  const velocityAdverse =
+    velocityEma !== null &&
+    velocityEma <= config.stopNegativeVelocityEma &&
+    edge.holdMs >= MIN_HOLD_MS;
+  if (!velocityAdverse) {
+    pos.velocityAdverseSinceMs = null;
+  } else if (pos.velocityAdverseSinceMs === null) {
+    pos.velocityAdverseSinceMs = now;
+  }
+  const velocityConfirmed =
+    pos.velocityAdverseSinceMs !== null &&
+    now - pos.velocityAdverseSinceMs >= config.stopVelocityConfirmMs;
+
+  if (edge.confirmed) {
+    if (edge.isReversed) {
+      return { price, reason: "gap reversal stop-loss", mode: "gap-reversal", edge };
+    }
+    if (
+      edge.isDeepRetrace &&
+      edge.currentSideGap <= EARLY_STOP_MAX_POSITIVE_SIDE_GAP
+    ) {
+      return { price, reason: "gap retrace stop-loss", mode: "gap-retrace", edge };
+    }
+  }
+  if (velocityConfirmed) {
+    return { price, reason: "velocity stop-loss", mode: "velocity", edge };
+  }
+  if (bid !== null && bid <= pos.stopLossPrice && edge.holdMs >= MIN_HOLD_MS) {
+    return { price: bid, reason: "price stop-loss", mode: "price", edge };
   }
   return null;
 }
@@ -520,6 +1022,7 @@ function placeSell(params: {
   metrics: StrategyMetrics;
   getMetrics: () => StrategyMetrics;
   expireAtMs?: number;
+  riskExit?: boolean;
   release: () => void;
 }): void {
   const {
@@ -532,11 +1035,13 @@ function placeSell(params: {
     metrics,
     getMetrics,
     expireAtMs,
+    riskExit = false,
     release,
   } = params;
   if (state.closing) return;
   state.closing = true;
-  const resolvedExpireAtMs = expireAtMs ?? ctx.slotEndMs;
+  const resolvedExpireAtMs =
+    expireAtMs ?? (riskExit ? Date.now() + CONFIG.riskExitOrderTtlMs : ctx.slotEndMs);
 
   // 每一次卖出都先记录一个策略信号，图片会把该信号点画成浅色标记；
   // 随后的 SELL order 会通过 signalId 关联到真实确认点，便于比较策略
@@ -575,13 +1080,43 @@ function placeSell(params: {
           `[${ctx.slug}] advantage-arb: SELL ${pos.side} @ ${price} expired — emergency selling`,
           "red",
         );
+        if (
+          riskExit &&
+          state.position === pos &&
+          Date.now() < ctx.slotEndMs - 1_000 &&
+          pos.riskExitAttempts < CONFIG.riskExitMaxRetries
+        ) {
+          pos.riskExitAttempts++;
+          state.closing = false;
+          const retryPrice = bestBid(ctx, pos.side) ?? Math.max(0.01, price - 0.01);
+          placeSell({
+            ctx,
+            state,
+            pos,
+            price: retryPrice,
+            label,
+            reason: `${reason} retry ${pos.riskExitAttempts}`,
+            metrics: {
+              ...getMetrics(),
+              exitReason: reason,
+              riskExitRetries: pos.riskExitAttempts,
+            },
+            getMetrics: () => ({
+              ...getMetrics(),
+              exitReason: reason,
+              riskExitRetries: pos.riskExitAttempts,
+            }),
+            riskExit: true,
+            release,
+          });
+          return;
+        }
+        state.closing = false;
         const sellIds = ctx.pendingOrders
           .filter((o) => o.action === "sell" && o.tokenId === pos.tokenId)
           .map((o) => o.orderId);
         if (sellIds.length > 0) {
           ctx.emergencySells(sellIds).finally(() => releaseOnce(state, release));
-        } else {
-          releaseOnce(state, release);
         }
       },
       onFailed(reasonText) {
@@ -615,15 +1150,10 @@ export const advantageArb: Strategy = async (ctx) => {
     released: false,
     settlementHoldLogged: false,
   };
-  const stats: EdgeStats = {
-    atr: null,
-    gapVelocity: null,
-    lastPrice: null,
-    lastGap: null,
-    lastUpdateMs: 0,
-  };
+  const stats = createEdgeStats();
 
   const tickInterval = setInterval(() => {
+    const now = Date.now();
     const remaining = Math.floor((ctx.slotEndMs - Date.now()) / 1000);
     if (remaining <= 0) {
       clearInterval(tickInterval);
@@ -636,7 +1166,7 @@ export const advantageArb: Strategy = async (ctx) => {
     if (priceToBeat === null || btcPrice === null) return;
 
     const gap = btcPrice - priceToBeat;
-    updateStats(stats, btcPrice, gap);
+    updateStats(stats, btcPrice, gap, now);
 
     if (!state.entered) {
       const entry = checkEntry({
@@ -646,6 +1176,7 @@ export const advantageArb: Strategy = async (ctx) => {
         priceToBeat,
         gap,
         stats,
+        now,
       });
 
       if (entry) {
@@ -661,6 +1192,23 @@ export const advantageArb: Strategy = async (ctx) => {
           stats,
           extra: {
             requiredAbsGap: entry.requiredAbsGap,
+            requiredSignalStrength: entry.requiredSignalStrength,
+            entrySignalStrength: entry.entrySignalStrength,
+            sideGapVelocity: sideGapVelocity(entry.side, stats.gapVelocity),
+            sideGapVelocityEma: sideGapVelocityEma(stats, entry.side),
+            trendConsistency:
+              trendConsistency(stats, entry.side) === null
+                ? null
+                : parseFloat(trendConsistency(stats, entry.side)!.toFixed(4)),
+            peakSideGap: entry.peakSideGap,
+            peakRetainRatio:
+              entry.peakRetainRatio === null
+                ? null
+                : parseFloat(entry.peakRetainRatio.toFixed(4)),
+            entryRetainRatio:
+              entry.entryRetainRatio === null
+                ? null
+                : parseFloat(entry.entryRetainRatio.toFixed(4)),
             entryAsk: entry.ask,
             entryLiquidity: entry.liquidity,
             plannedTakeProfit: entry.takeProfitPrice,
@@ -709,6 +1257,8 @@ export const advantageArb: Strategy = async (ctx) => {
                   stats,
                   extra: {
                     requiredAbsGap: entry.requiredAbsGap,
+                    requiredSignalStrength: entry.requiredSignalStrength,
+                    entrySignalStrength: entry.entrySignalStrength,
                     entryAsk: entry.ask,
                     plannedTakeProfit: entry.takeProfitPrice,
                     plannedStopLoss: entry.stopLossPrice,
@@ -735,6 +1285,9 @@ export const advantageArb: Strategy = async (ctx) => {
                 peakSideGap: entryAbsGap,
                 peakBid: bestBid(ctx, entry.side),
                 adverseSinceMs: null,
+                velocityAdverseSinceMs: null,
+                settlementInvalidSinceMs: null,
+                riskExitAttempts: 0,
               };
               state.settlementHoldLogged = false;
               ctx.log(
@@ -786,8 +1339,8 @@ export const advantageArb: Strategy = async (ctx) => {
       bid,
       bidLiquidity: bidInfo?.liquidity ?? null,
       remaining,
-      stats,
-    });
+        stats,
+      });
     if (takeProfit) {
       placeSell({
         ctx,
@@ -799,10 +1352,12 @@ export const advantageArb: Strategy = async (ctx) => {
         metrics: {
           ...metrics(),
           exitReason: takeProfit.reason,
+          takeProfitMode: takeProfit.mode,
         },
         getMetrics: () => ({
           ...metrics(),
           exitReason: takeProfit.reason,
+          takeProfitMode: takeProfit.mode,
         }),
         release,
       });
@@ -828,6 +1383,7 @@ export const advantageArb: Strategy = async (ctx) => {
         metrics: {
           ...metrics(),
           exitReason: earlyStop.reason,
+          stopLossMode: earlyStop.mode,
           holdSeconds: parseFloat((earlyStop.edge.holdMs / 1000).toFixed(3)),
           peakRetainRatio: parseFloat(earlyStop.edge.peakRetainRatio.toFixed(4)),
           entryRetainRatio: parseFloat(earlyStop.edge.entryRetainRatio.toFixed(4)),
@@ -835,10 +1391,12 @@ export const advantageArb: Strategy = async (ctx) => {
         getMetrics: () => ({
           ...metrics(),
           exitReason: earlyStop.reason,
+          stopLossMode: earlyStop.mode,
           holdSeconds: parseFloat((earlyStop.edge.holdMs / 1000).toFixed(3)),
           peakRetainRatio: parseFloat(earlyStop.edge.peakRetainRatio.toFixed(4)),
           entryRetainRatio: parseFloat(earlyStop.edge.entryRetainRatio.toFixed(4)),
         }),
+        riskExit: true,
         release,
       });
       return;
@@ -866,11 +1424,14 @@ export const advantageArb: Strategy = async (ctx) => {
         metrics: {
           ...metrics(),
           exitReason: "last-minute stop-loss",
+          stopLossMode: "last-minute",
         },
         getMetrics: () => ({
           ...metrics(),
           exitReason: "last-minute stop-loss",
+          stopLossMode: "last-minute",
         }),
+        riskExit: true,
         release,
       });
       return;
@@ -883,6 +1444,8 @@ export const advantageArb: Strategy = async (ctx) => {
         bid,
         remaining,
         atr: stats.atr,
+        stats,
+        now: Date.now(),
       });
       if (settlement.holdToSettlement) {
         if (!state.settlementHoldLogged) {
@@ -911,17 +1474,20 @@ export const advantageArb: Strategy = async (ctx) => {
           metrics: {
             ...metrics(),
             exitReason: "final 30s exit",
+            stopLossMode: "final-exit",
           },
           getMetrics: () => ({
             ...metrics(),
             exitReason: "final 30s exit",
+            stopLossMode: "final-exit",
           }),
           expireAtMs: ctx.slotEndMs,
+          riskExit: true,
           release,
         });
       }
     }
-  }, 0);
+  }, CONFIG.tickIntervalMs);
 
   return () => {
     clearInterval(tickInterval);
@@ -929,6 +1495,16 @@ export const advantageArb: Strategy = async (ctx) => {
 };
 
 export const __advantageArbTestHooks = {
+  readConfig,
+  createEdgeStats,
+  updateStats,
+  computeEntrySignalStrength,
+  canEnterByTime,
+  detectAntiRetraceEntry,
+  sideGapVelocity,
+  sideGapVelocityEma,
+  trendConsistency,
+  settlementView,
   plannedStopLossPrice,
   shouldTakeProfit,
   shouldEarlyStopLoss,
