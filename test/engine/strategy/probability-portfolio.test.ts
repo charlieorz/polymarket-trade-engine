@@ -76,6 +76,77 @@ describe("probability-portfolio entry and payoff", () => {
     expect(entry).toBeNull();
   });
 
+  test("blocks opposite-side entries unless explicitly enabled", () => {
+    const config = {
+      ...__probabilityPortfolioTestHooks.readProbabilityPortfolioConfig({}),
+      allowOppositeSides: false,
+      maxOpenLegs: 2,
+      maxEntriesPerMarket: 2,
+      minContinuationNetEdge: 0.01,
+      minContinuationScore: 0.5,
+    };
+    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
+      remaining: 120,
+      gap: 20,
+      upQuality: quality({ ask: 0.52, bid: 0.51 }),
+      downQuality: quality({ ask: 0.49, bid: 0.48 }),
+      stats: seededStats(),
+      state: {
+        legs: [
+          {
+            id: "down",
+            model: "reversal",
+            side: "DOWN",
+            tokenId: "down",
+            entryPrice: 0.45,
+            entryGap: -10,
+            entrySideGap: 10,
+            entryMs: 1,
+            shares: 6,
+            pFairEntry: 0.7,
+            netEdgeEntry: 0.1,
+            scoreEntry: 0.7,
+            takeProfitPrice: 0.55,
+            stopLossPrice: 0.38,
+            peakSideGap: 10,
+            peakBid: 0.48,
+            trendInvalidSinceMs: null,
+            riskExitAttempts: 0,
+          },
+        ],
+        realizedCash: -2.7,
+        openedLegCount: 1,
+      },
+      config,
+    });
+
+    expect(entry).toBeNull();
+  });
+
+  test("blocks continuation after the advantage-side gap stalls", () => {
+    const stats = seededStats();
+    stats.gapDeltas = [0.9, 1.1, 1.2, 0.05, 0, 0.04];
+    const config = {
+      ...__probabilityPortfolioTestHooks.readProbabilityPortfolioConfig({}),
+      maxContinuationFlatTicks: 1,
+      minContinuationSideVelocityShort: 0.1,
+      minContinuationSideVelocityMid: 0.1,
+      minContinuationNetEdge: 0.01,
+      minContinuationScore: 0.5,
+    };
+    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
+      remaining: 120,
+      gap: 20,
+      upQuality: quality({ ask: 0.52, bid: 0.51 }),
+      downQuality: quality({ ask: 0.49, bid: 0.48 }),
+      stats,
+      state: { legs: [], realizedCash: 0, openedLegCount: 0 },
+      config,
+    });
+
+    expect(entry).toBeNull();
+  });
+
   test("computes guaranteed payoff from balanced UP/DOWN legs", () => {
     const view = __probabilityPortfolioTestHooks.portfolioView({
       realizedCash: -5.7,

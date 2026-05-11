@@ -14,8 +14,11 @@ export type PortfolioConfig = {
   tickIntervalMs: number;
   statsIntervalMs: number;
   shares: number;
+  entryOrderType: "GTC" | "FOK";
+  entryOrderTtlMs: number;
   minEntryRemaining: number;
   maxEntryRemaining: number;
+  allowOppositeSides: boolean;
   maxOpenLegs: number;
   maxSameSideLegs: number;
   maxEntriesPerMarket: number;
@@ -31,12 +34,19 @@ export type PortfolioConfig = {
   minContinuationAbsGap: number;
   minContinuationRelativeGap: number;
   minContinuationPeakRetain: number;
+  minContinuationSideVelocityShort: number;
+  minContinuationSideVelocityMid: number;
+  minContinuationAcceleration: number;
+  minContinuationEmaTrend: number;
+  maxContinuationFlatTicks: number;
   minContinuationNetEdge: number;
   minContinuationScore: number;
   minReversalAbsGap: number;
   minReversalRelativeGap: number;
   minReversalPeakRetrace: number;
   maxReversalPeakRetrace: number;
+  minReversalVelocityTowardZero: number;
+  maxReversalFlatTicks: number;
   minReversalNetEdge: number;
   minReversalScore: number;
   reversalScoreMargin: number;
@@ -179,43 +189,140 @@ function parseNumberEnv(
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseBooleanEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const value = env[key];
+  if (value === undefined || value.trim() === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function parseOrderTypeEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+  fallback: "GTC" | "FOK",
+): "GTC" | "FOK" {
+  const value = env[key]?.trim().toUpperCase();
+  return value === "GTC" || value === "FOK" ? value : fallback;
+}
+
 export function readProbabilityPortfolioConfig(
   env: Record<string, string | undefined> = process.env,
 ): PortfolioConfig {
   return {
-    tickIntervalMs: Math.max(50, parseNumberEnv(env, "PP_TICK_INTERVAL_MS", 200)),
-    statsIntervalMs: Math.max(250, parseNumberEnv(env, "PP_STATS_INTERVAL_MS", 1000)),
+    tickIntervalMs: Math.max(
+      50,
+      parseNumberEnv(env, "PP_TICK_INTERVAL_MS", 200),
+    ),
+    statsIntervalMs: Math.max(
+      250,
+      parseNumberEnv(env, "PP_STATS_INTERVAL_MS", 1000),
+    ),
     shares: Math.max(1, parseNumberEnv(env, "PP_SHARES", 6)),
-    minEntryRemaining: Math.max(1, parseNumberEnv(env, "PP_MIN_ENTRY_REMAINING", 35)),
-    maxEntryRemaining: Math.max(1, parseNumberEnv(env, "PP_MAX_ENTRY_REMAINING", 245)),
-    maxOpenLegs: Math.max(1, Math.floor(parseNumberEnv(env, "PP_MAX_OPEN_LEGS", 2))),
-    maxSameSideLegs: Math.max(1, Math.floor(parseNumberEnv(env, "PP_MAX_SAME_SIDE_LEGS", 1))),
+    entryOrderType: parseOrderTypeEnv(env, "PP_ENTRY_ORDER_TYPE", "FOK"),
+    entryOrderTtlMs: Math.max(
+      250,
+      parseNumberEnv(env, "PP_ENTRY_ORDER_TTL_MS", 2_000),
+    ),
+    minEntryRemaining: Math.max(
+      1,
+      parseNumberEnv(env, "PP_MIN_ENTRY_REMAINING", 35),
+    ),
+    maxEntryRemaining: Math.max(
+      1,
+      parseNumberEnv(env, "PP_MAX_ENTRY_REMAINING", 235),
+    ),
+    allowOppositeSides: parseBooleanEnv(env, "PP_ALLOW_OPPOSITE_SIDES", false),
+    maxOpenLegs: Math.max(
+      1,
+      Math.floor(parseNumberEnv(env, "PP_MAX_OPEN_LEGS", 1)),
+    ),
+    maxSameSideLegs: Math.max(
+      1,
+      Math.floor(parseNumberEnv(env, "PP_MAX_SAME_SIDE_LEGS", 1)),
+    ),
     maxEntriesPerMarket: Math.max(
       1,
       Math.floor(parseNumberEnv(env, "PP_MAX_ENTRIES_PER_MARKET", 1)),
     ),
     minEntryAsk: Math.max(0.01, parseNumberEnv(env, "PP_MIN_ENTRY_ASK", 0.24)),
-    maxContinuationAsk: Math.min(0.99, parseNumberEnv(env, "PP_MAX_CONTINUATION_ASK", 0.68)),
-    maxReversalAsk: Math.min(0.99, parseNumberEnv(env, "PP_MAX_REVERSAL_ASK", 0.58)),
+    maxContinuationAsk: Math.min(
+      0.99,
+      parseNumberEnv(env, "PP_MAX_CONTINUATION_ASK", 0.68),
+    ),
+    maxReversalAsk: Math.min(
+      0.99,
+      parseNumberEnv(env, "PP_MAX_REVERSAL_ASK", 0.58),
+    ),
     maxSpread: Math.max(0, parseNumberEnv(env, "PP_MAX_SPREAD", 0.04)),
-    minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "PP_MIN_ENTRY_LIQUIDITY_USD", 8)),
-    minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "PP_MIN_EXIT_LIQUIDITY_USD", 8)),
+    minEntryLiquidityUsd: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_ENTRY_LIQUIDITY_USD", 8),
+    ),
+    minExitLiquidityUsd: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_EXIT_LIQUIDITY_USD", 8),
+    ),
     costBuffer: Math.max(0, parseNumberEnv(env, "PP_COST_BUFFER", 0.008)),
-    sigmaMultiplier: Math.max(1, parseNumberEnv(env, "PP_SIGMA_MULTIPLIER", 1.4)),
-    projectionSeconds: Math.max(0, parseNumberEnv(env, "PP_PROJECTION_SECONDS", 20)),
-    minContinuationAbsGap: Math.max(0, parseNumberEnv(env, "PP_MIN_CONTINUATION_ABS_GAP", 7)),
+    sigmaMultiplier: Math.max(
+      1,
+      parseNumberEnv(env, "PP_SIGMA_MULTIPLIER", 1.4),
+    ),
+    projectionSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "PP_PROJECTION_SECONDS", 20),
+    ),
+    minContinuationAbsGap: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_CONTINUATION_ABS_GAP", 7),
+    ),
     minContinuationRelativeGap: Math.max(
       0,
       parseNumberEnv(env, "PP_MIN_CONTINUATION_RELATIVE_GAP", 0.62),
     ),
     minContinuationPeakRetain: Math.max(
       0,
-      Math.min(1, parseNumberEnv(env, "PP_MIN_CONTINUATION_PEAK_RETAIN", 0.74)),
+      Math.min(1, parseNumberEnv(env, "PP_MIN_CONTINUATION_PEAK_RETAIN", 0.82)),
     ),
-    minContinuationNetEdge: Math.max(0, parseNumberEnv(env, "PP_MIN_CONTINUATION_NET_EDGE", 0.015)),
-    minContinuationScore: Math.max(0, parseNumberEnv(env, "PP_MIN_CONTINUATION_SCORE", 0.56)),
-    minReversalAbsGap: Math.max(0, parseNumberEnv(env, "PP_MIN_REVERSAL_ABS_GAP", 10)),
-    minReversalRelativeGap: Math.max(0, parseNumberEnv(env, "PP_MIN_REVERSAL_RELATIVE_GAP", 0.85)),
+    minContinuationSideVelocityShort: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_CONTINUATION_SIDE_VELOCITY_SHORT", 1.1),
+    ),
+    minContinuationSideVelocityMid: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_CONTINUATION_SIDE_VELOCITY_MID", 2.5),
+    ),
+    minContinuationAcceleration: parseNumberEnv(
+      env,
+      "PP_MIN_CONTINUATION_ACCELERATION",
+      -0.25,
+    ),
+    minContinuationEmaTrend: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_CONTINUATION_EMA_TREND", 0.8),
+    ),
+    maxContinuationFlatTicks: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "PP_MAX_CONTINUATION_FLAT_TICKS", 1)),
+    ),
+    minContinuationNetEdge: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_CONTINUATION_NET_EDGE", 0.015),
+    ),
+    minContinuationScore: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_CONTINUATION_SCORE", 0.62),
+    ),
+    minReversalAbsGap: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_REVERSAL_ABS_GAP", 10),
+    ),
+    minReversalRelativeGap: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_REVERSAL_RELATIVE_GAP", 0.85),
+    ),
     minReversalPeakRetrace: Math.max(
       0,
       Math.min(1, parseNumberEnv(env, "PP_MIN_REVERSAL_PEAK_RETRACE", 0.14)),
@@ -224,28 +331,88 @@ export function readProbabilityPortfolioConfig(
       0,
       Math.min(1, parseNumberEnv(env, "PP_MAX_REVERSAL_PEAK_RETRACE", 0.58)),
     ),
-    minReversalNetEdge: Math.max(0, parseNumberEnv(env, "PP_MIN_REVERSAL_NET_EDGE", 0.02)),
-    minReversalScore: Math.max(0, parseNumberEnv(env, "PP_MIN_REVERSAL_SCORE", 0.52)),
-    reversalScoreMargin: Math.max(0, parseNumberEnv(env, "PP_REVERSAL_SCORE_MARGIN", 0.03)),
-    maxSignFlipCount: Math.max(0, Math.floor(parseNumberEnv(env, "PP_MAX_SIGN_FLIP_COUNT", 4))),
-    takeProfitCents: Math.max(0, parseNumberEnv(env, "PP_TAKE_PROFIT_CENTS", 0.09)),
-    profitLockMin: Math.max(0, parseNumberEnv(env, "PP_PROFIT_LOCK_MIN", 0.045)),
-    trailingDrawdownCents: Math.max(0, parseNumberEnv(env, "PP_TRAILING_DRAWDOWN_CENTS", 0.045)),
-    maxLossCents: Math.max(0.01, parseNumberEnv(env, "PP_MAX_LOSS_CENTS", 0.05)),
-    catastrophicLossCents: Math.max(0.01, parseNumberEnv(env, "PP_CATASTROPHIC_LOSS_CENTS", 0.17)),
+    minReversalVelocityTowardZero: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_REVERSAL_VELOCITY_TOWARD_ZERO", 1.2),
+    ),
+    maxReversalFlatTicks: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "PP_MAX_REVERSAL_FLAT_TICKS", 1)),
+    ),
+    minReversalNetEdge: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_REVERSAL_NET_EDGE", 0.02),
+    ),
+    minReversalScore: Math.max(
+      0,
+      parseNumberEnv(env, "PP_MIN_REVERSAL_SCORE", 0.52),
+    ),
+    reversalScoreMargin: Math.max(
+      0,
+      parseNumberEnv(env, "PP_REVERSAL_SCORE_MARGIN", 0.03),
+    ),
+    maxSignFlipCount: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "PP_MAX_SIGN_FLIP_COUNT", 4)),
+    ),
+    takeProfitCents: Math.max(
+      0,
+      parseNumberEnv(env, "PP_TAKE_PROFIT_CENTS", 0.09),
+    ),
+    profitLockMin: Math.max(
+      0,
+      parseNumberEnv(env, "PP_PROFIT_LOCK_MIN", 0.045),
+    ),
+    trailingDrawdownCents: Math.max(
+      0,
+      parseNumberEnv(env, "PP_TRAILING_DRAWDOWN_CENTS", 0.045),
+    ),
+    maxLossCents: Math.max(
+      0.01,
+      parseNumberEnv(env, "PP_MAX_LOSS_CENTS", 0.05),
+    ),
+    catastrophicLossCents: Math.max(
+      0.01,
+      parseNumberEnv(env, "PP_CATASTROPHIC_LOSS_CENTS", 0.17),
+    ),
     minHoldMs: Math.max(0, parseNumberEnv(env, "PP_MIN_HOLD_MS", 8_000)),
-    reversalFailureMinHoldMs: Math.max(0, parseNumberEnv(env, "PP_REVERSAL_FAILURE_MIN_HOLD_MS", 4_000)),
-    trendInvalidConfirmMs: Math.max(0, parseNumberEnv(env, "PP_TREND_INVALID_CONFIRM_MS", 2_500)),
-    settlementHoldMaxSeconds: Math.max(1, parseNumberEnv(env, "PP_SETTLEMENT_HOLD_MAX_SECONDS", 70)),
+    reversalFailureMinHoldMs: Math.max(
+      0,
+      parseNumberEnv(env, "PP_REVERSAL_FAILURE_MIN_HOLD_MS", 4_000),
+    ),
+    trendInvalidConfirmMs: Math.max(
+      0,
+      parseNumberEnv(env, "PP_TREND_INVALID_CONFIRM_MS", 2_500),
+    ),
+    settlementHoldMaxSeconds: Math.max(
+      1,
+      parseNumberEnv(env, "PP_SETTLEMENT_HOLD_MAX_SECONDS", 70),
+    ),
     settlementMinProbability: Math.max(
       0,
       Math.min(1, parseNumberEnv(env, "PP_SETTLEMENT_MIN_PROBABILITY", 0.9)),
     ),
-    settlementMinSideGap: Math.max(0, parseNumberEnv(env, "PP_SETTLEMENT_MIN_SIDE_GAP", 5)),
-    settlementMinGuaranteedPnl: parseNumberEnv(env, "PP_SETTLEMENT_MIN_GUARANTEED_PNL", 0.06),
-    finalExitSeconds: Math.max(1, parseNumberEnv(env, "PP_FINAL_EXIT_SECONDS", 24)),
-    riskExitOrderTtlMs: Math.max(250, parseNumberEnv(env, "PP_RISK_EXIT_ORDER_TTL_MS", 4_000)),
-    riskExitMaxRetries: Math.max(0, Math.floor(parseNumberEnv(env, "PP_RISK_EXIT_MAX_RETRIES", 3))),
+    settlementMinSideGap: Math.max(
+      0,
+      parseNumberEnv(env, "PP_SETTLEMENT_MIN_SIDE_GAP", 5),
+    ),
+    settlementMinGuaranteedPnl: parseNumberEnv(
+      env,
+      "PP_SETTLEMENT_MIN_GUARANTEED_PNL",
+      0.06,
+    ),
+    finalExitSeconds: Math.max(
+      1,
+      parseNumberEnv(env, "PP_FINAL_EXIT_SECONDS", 24),
+    ),
+    riskExitOrderTtlMs: Math.max(
+      250,
+      parseNumberEnv(env, "PP_RISK_EXIT_ORDER_TTL_MS", 4_000),
+    ),
+    riskExitMaxRetries: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "PP_RISK_EXIT_MAX_RETRIES", 3)),
+    ),
   };
 }
 
@@ -282,12 +449,11 @@ function erf(x: number): number {
   const t = 1 / (1 + 0.3275911 * absX);
   const y =
     1 -
-    (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t -
-      0.284496736) *
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
       t +
       0.254829592) *
       t *
-      Math.exp(-absX * absX));
+      Math.exp(-absX * absX);
   return sign * y;
 }
 
@@ -330,6 +496,19 @@ function signFlipCount(values: number[]): number {
     previous = sign;
   }
   return flips;
+}
+
+function staleOrFlatTicks(
+  values: number[],
+  side: PortfolioSide,
+  threshold: number,
+): number {
+  const sign = sideSign(side);
+  let count = 0;
+  for (const value of values) {
+    if (value * sign <= threshold) count++;
+  }
+  return count;
 }
 
 function quoteSlope(
@@ -450,7 +629,11 @@ function fairProbability(params: {
   projectedGap?: number;
   config?: PortfolioConfig;
 }): number {
-  const sigma = remainingSigma(params.stats, params.remaining, params.config ?? CONFIG);
+  const sigma = remainingSigma(
+    params.stats,
+    params.remaining,
+    params.config ?? CONFIG,
+  );
   if (sigma === null || sigma <= EPSILON) return 0.5;
   const z = sideGap(params.side, params.projectedGap ?? params.gap) / sigma;
   return clamp(normalCdf(z), 0.01, 0.99);
@@ -461,7 +644,9 @@ function momentumSnapshot(stats: PortfolioStats) {
   const velocityMid = sumRecent(stats.gapDeltas, 10);
   const previousShort = sumRecent(stats.gapDeltas, 3, 1);
   const acceleration =
-    velocityShort === null || previousShort === null ? null : velocityShort - previousShort;
+    velocityShort === null || previousShort === null
+      ? null
+      : velocityShort - previousShort;
   const emaTrend =
     stats.fastGapEma === null || stats.slowGapEma === null
       ? null
@@ -484,7 +669,9 @@ export function computeBookQuality(params: {
     spread,
     depthImbalance:
       depth > 0
-        ? parseFloat(((params.bid.liquidity - params.ask.liquidity) / depth).toFixed(4))
+        ? parseFloat(
+            ((params.bid.liquidity - params.ask.liquidity) / depth).toFixed(4),
+          )
         : null,
   };
 }
@@ -535,20 +722,35 @@ function canAddLeg(params: {
 }): boolean {
   const pendingEntryCount = params.state.pendingEntryCount ?? 0;
   if (
-    (params.state.openedLegCount ?? params.state.legs.length) + pendingEntryCount >=
+    (params.state.openedLegCount ?? params.state.legs.length) +
+      pendingEntryCount >=
     params.config.maxEntriesPerMarket
   ) {
     return false;
   }
-  if (params.state.legs.length + pendingEntryCount >= params.config.maxOpenLegs) return false;
+  if (params.state.legs.length + pendingEntryCount >= params.config.maxOpenLegs)
+    return false;
+  if (
+    !params.config.allowOppositeSides &&
+    params.state.legs.some((leg) => leg.side !== params.side)
+  ) {
+    return false;
+  }
   const sameSide =
     params.state.legs.filter((leg) => leg.side === params.side).length +
     (params.state.pendingEntrySideCounts?.[params.side] ?? 0);
   return sameSide < params.config.maxSameSideLegs;
 }
 
-function netEdge(pFair: number, quality: BookQuality, config: PortfolioConfig): number {
-  const executionBuffer = Math.max(config.costBuffer, quality.spread + config.costBuffer * 0.5);
+function netEdge(
+  pFair: number,
+  quality: BookQuality,
+  config: PortfolioConfig,
+): number {
+  const executionBuffer = Math.max(
+    config.costBuffer,
+    quality.spread + config.costBuffer * 0.5,
+  );
   return parseFloat((pFair - quality.ask - executionBuffer).toFixed(4));
 }
 
@@ -597,35 +799,77 @@ function evaluateContinuation(params: {
 }): PortfolioEntryDecision | null {
   const { side, gap, remaining, quality, stats, state, config } = params;
   if (!canAddLeg({ side, state, config })) return null;
-  if (!marketPassesCommonFilters(quality, config, config.maxContinuationAsk)) return null;
-  if (signFlipCount(stats.gapDeltas.slice(-10)) > config.maxSignFlipCount) return null;
+  if (!marketPassesCommonFilters(quality, config, config.maxContinuationAsk))
+    return null;
+  if (signFlipCount(stats.gapDeltas.slice(-10)) > config.maxSignFlipCount)
+    return null;
 
   const absGap = Math.abs(gap);
   const sigma = remainingSigma(stats, remaining, config);
   const relativeGap = sigma === null ? null : absGap / Math.max(sigma, EPSILON);
   const peakRetain = stats.peakAbsGap > 0 ? absGap / stats.peakAbsGap : null;
   const peakRetrace = peakRetain === null ? null : 1 - peakRetain;
-  const { velocityShort, velocityMid, acceleration, emaTrend } = momentumSnapshot(stats);
+  const { velocityShort, velocityMid, acceleration, emaTrend } =
+    momentumSnapshot(stats);
   const sign = sideSign(side);
-  const sideVelocityShort = velocityShort === null ? null : velocityShort * sign;
+  const sideVelocityShort =
+    velocityShort === null ? null : velocityShort * sign;
   const sideVelocityMid = velocityMid === null ? null : velocityMid * sign;
   const sideAcceleration = acceleration === null ? null : acceleration * sign;
   const sideEmaTrend = emaTrend === null ? null : emaTrend * sign;
   const projectedGap =
-    gap + (stats.gapVelocityEma ?? velocityShort ?? 0) * Math.min(config.projectionSeconds, remaining * 0.25);
-  const pFair = fairProbability({ side, gap, remaining, stats, projectedGap, config });
+    gap +
+    (stats.gapVelocityEma ?? velocityShort ?? 0) *
+      Math.min(config.projectionSeconds, remaining * 0.25);
+  const pFair = fairProbability({
+    side,
+    gap,
+    remaining,
+    stats,
+    projectedGap,
+    config,
+  });
   const edge = netEdge(pFair, quality, config);
 
   if (absGap < config.minContinuationAbsGap) return null;
-  if (relativeGap !== null && relativeGap < config.minContinuationRelativeGap) return null;
-  if (peakRetain !== null && peakRetain < config.minContinuationPeakRetain) return null;
-  if (sideVelocityShort !== null && sideVelocityShort <= 0) return null;
-  if (sideVelocityMid !== null && sideVelocityMid < -0.5) return null;
-  if (sideAcceleration !== null && sideAcceleration < -2) return null;
-  if (sideEmaTrend !== null && sideEmaTrend <= 0) return null;
+  if (relativeGap !== null && relativeGap < config.minContinuationRelativeGap)
+    return null;
+  if (peakRetain !== null && peakRetain < config.minContinuationPeakRetain)
+    return null;
+  if (
+    staleOrFlatTicks(stats.gapDeltas.slice(-3), side, 0.1) >
+    config.maxContinuationFlatTicks
+  ) {
+    return null;
+  }
+  if (
+    sideVelocityShort !== null &&
+    sideVelocityShort < config.minContinuationSideVelocityShort
+  ) {
+    return null;
+  }
+  if (
+    sideVelocityMid !== null &&
+    sideVelocityMid < config.minContinuationSideVelocityMid
+  ) {
+    return null;
+  }
+  if (
+    sideAcceleration !== null &&
+    sideAcceleration < config.minContinuationAcceleration
+  ) {
+    return null;
+  }
+  if (sideEmaTrend !== null && sideEmaTrend < config.minContinuationEmaTrend)
+    return null;
   if (edge < config.minContinuationNetEdge) return null;
 
-  const after = portfolioAfterBuy({ state, side, ask: quality.ask, shares: config.shares });
+  const after = portfolioAfterBuy({
+    state,
+    side,
+    ask: quality.ask,
+    shares: config.shares,
+  });
   const hedgeBonus = state.legs.some((leg) => leg.side === oppositeSide(side))
     ? clamp((after.guaranteedPnl - portfolioView(state).guaranteedPnl) / 0.5)
     : 0;
@@ -640,8 +884,15 @@ function evaluateContinuation(params: {
       ? 0.5
       : clamp((relativeGap - config.minContinuationRelativeGap) / 1.2);
   const retainScore =
-    peakRetain === null ? 0.5 : clamp((peakRetain - config.minContinuationPeakRetain) / 0.26);
-  const bookScore = clamp((quality.bidLiquidity - quality.askLiquidity) / Math.max(quality.bidLiquidity + quality.askLiquidity, EPSILON) / 2 + 0.5);
+    peakRetain === null
+      ? 0.5
+      : clamp((peakRetain - config.minContinuationPeakRetain) / 0.26);
+  const bookScore = clamp(
+    (quality.bidLiquidity - quality.askLiquidity) /
+      Math.max(quality.bidLiquidity + quality.askLiquidity, EPSILON) /
+      2 +
+      0.5,
+  );
   const score = parseFloat(
     (
       0.3 * edgeScore +
@@ -693,42 +944,79 @@ function evaluateReversal(params: {
 }): PortfolioEntryDecision | null {
   const { side, gap, remaining, quality, stats, state, config } = params;
   if (!canAddLeg({ side, state, config })) return null;
-  if (!marketPassesCommonFilters(quality, config, config.maxReversalAsk)) return null;
-  if (signFlipCount(stats.gapDeltas.slice(-10)) > config.maxSignFlipCount + 1) return null;
+  if (!marketPassesCommonFilters(quality, config, config.maxReversalAsk))
+    return null;
+  if (signFlipCount(stats.gapDeltas.slice(-10)) > config.maxSignFlipCount + 1)
+    return null;
 
   const absGap = Math.abs(gap);
   const sigma = remainingSigma(stats, remaining, config);
   const relativeGap = sigma === null ? null : absGap / Math.max(sigma, EPSILON);
   const peakRetain = stats.peakAbsGap > 0 ? absGap / stats.peakAbsGap : null;
   const peakRetrace = peakRetain === null ? null : 1 - peakRetain;
-  const { velocityShort, velocityMid, acceleration, emaTrend } = momentumSnapshot(stats);
+  const { velocityShort, velocityMid, acceleration, emaTrend } =
+    momentumSnapshot(stats);
   const advSign = sideSign(advantageSide(gap));
-  const movingTowardZero = velocityShort !== null && velocityShort * advSign < 0;
-  const accelerationAgainstAdv = acceleration !== null && acceleration * advSign < 0;
+  const movingTowardZero =
+    velocityShort !== null && velocityShort * advSign < 0;
+  const velocityTowardZero =
+    velocityShort === null ? null : -velocityShort * advSign;
+  const accelerationAgainstAdv =
+    acceleration !== null && acceleration * advSign < 0;
   const emaAgainstAdv = emaTrend !== null && emaTrend * advSign < 0;
   const bidSlope3s = quoteSlope(stats, side, "bid", 3);
   const askSlope3s = quoteSlope(stats, side, "ask", 3);
   const projectedGap =
-    gap + (stats.gapVelocityEma ?? velocityShort ?? 0) * Math.min(config.projectionSeconds, remaining * 0.3);
-  const pFair = fairProbability({ side, gap, remaining, stats, projectedGap, config });
+    gap +
+    (stats.gapVelocityEma ?? velocityShort ?? 0) *
+      Math.min(config.projectionSeconds, remaining * 0.3);
+  const pFair = fairProbability({
+    side,
+    gap,
+    remaining,
+    stats,
+    projectedGap,
+    config,
+  });
   const edge = netEdge(pFair, quality, config);
 
   if (absGap < config.minReversalAbsGap) return null;
-  if (relativeGap !== null && relativeGap < config.minReversalRelativeGap) return null;
-  if (peakRetrace === null || peakRetrace < config.minReversalPeakRetrace) return null;
+  if (relativeGap !== null && relativeGap < config.minReversalRelativeGap)
+    return null;
+  if (peakRetrace === null || peakRetrace < config.minReversalPeakRetrace)
+    return null;
   if (peakRetrace > config.maxReversalPeakRetrace) return null;
+  if (
+    staleOrFlatTicks(stats.gapDeltas.slice(-3), side, 0.1) >
+    config.maxReversalFlatTicks
+  ) {
+    return null;
+  }
+  if (
+    velocityTowardZero !== null &&
+    velocityTowardZero < config.minReversalVelocityTowardZero
+  ) {
+    return null;
+  }
   if (!movingTowardZero || !accelerationAgainstAdv) return null;
   if (!emaAgainstAdv && (bidSlope3s === null || bidSlope3s <= 0)) return null;
   if (askSlope3s !== null && askSlope3s > 0.06) return null;
   if (edge < config.minReversalNetEdge) return null;
 
-  const after = portfolioAfterBuy({ state, side, ask: quality.ask, shares: config.shares });
+  const after = portfolioAfterBuy({
+    state,
+    side,
+    ask: quality.ask,
+    shares: config.shares,
+  });
   const hedgeBonus = state.legs.some((leg) => leg.side === oppositeSide(side))
     ? clamp((after.guaranteedPnl - portfolioView(state).guaranteedPnl) / 0.5)
     : 0;
   const edgeScore = clamp(edge / 0.18);
   const extensionScore =
-    relativeGap === null ? 0.5 : clamp((relativeGap - config.minReversalRelativeGap) / 1.6);
+    relativeGap === null
+      ? 0.5
+      : clamp((relativeGap - config.minReversalRelativeGap) / 1.6);
   const decayScore =
     ((movingTowardZero ? 1 : 0) +
       (accelerationAgainstAdv ? 1 : 0) +
@@ -737,9 +1025,17 @@ function evaluateReversal(params: {
     4;
   const retraceScore = clamp(
     (peakRetrace - config.minReversalPeakRetrace) /
-      Math.max(config.maxReversalPeakRetrace - config.minReversalPeakRetrace, EPSILON),
+      Math.max(
+        config.maxReversalPeakRetrace - config.minReversalPeakRetrace,
+        EPSILON,
+      ),
   );
-  const bookScore = clamp((quality.bidLiquidity - quality.askLiquidity) / Math.max(quality.bidLiquidity + quality.askLiquidity, EPSILON) / 2 + 0.5);
+  const bookScore = clamp(
+    (quality.bidLiquidity - quality.askLiquidity) /
+      Math.max(quality.bidLiquidity + quality.askLiquidity, EPSILON) /
+      2 +
+      0.5,
+  );
   const score = parseFloat(
     (
       0.3 * edgeScore +
@@ -775,8 +1071,12 @@ function evaluateReversal(params: {
     netEdge: edge,
     projectedGap,
     guaranteedPnlAfter: after.guaranteedPnl,
-    takeProfitPrice: priceRound(Math.min(0.94, quality.ask + config.takeProfitCents)),
-    stopLossPrice: priceRound(quality.ask - Math.min(config.maxLossCents, 0.07)),
+    takeProfitPrice: priceRound(
+      Math.min(0.94, quality.ask + config.takeProfitCents),
+    ),
+    stopLossPrice: priceRound(
+      quality.ask - Math.min(config.maxLossCents, 0.07),
+    ),
   };
 }
 
@@ -790,7 +1090,10 @@ export function choosePortfolioEntry(params: {
   config?: PortfolioConfig;
 }): PortfolioEntryDecision | null {
   const config = params.config ?? CONFIG;
-  if (params.remaining < config.minEntryRemaining || params.remaining > config.maxEntryRemaining) {
+  if (
+    params.remaining < config.minEntryRemaining ||
+    params.remaining > config.maxEntryRemaining
+  ) {
     return null;
   }
   if (params.remaining <= config.finalExitSeconds) return null;
@@ -824,22 +1127,30 @@ export function choosePortfolioEntry(params: {
 
   if (
     reversal &&
-    (!continuation || reversal.score >= continuation.score + config.reversalScoreMargin)
+    (!continuation ||
+      reversal.score >= continuation.score + config.reversalScoreMargin)
   ) {
     return reversal;
   }
   return continuation;
 }
 
-function trendSupportsLeg(leg: PortfolioLeg, gap: number, stats: PortfolioStats): boolean {
+function trendSupportsLeg(
+  leg: PortfolioLeg,
+  gap: number,
+  stats: PortfolioStats,
+): boolean {
   const { velocityShort, velocityMid, emaTrend } = momentumSnapshot(stats);
   const sign = sideSign(leg.side);
-  const sideVelocityShort = velocityShort === null ? null : velocityShort * sign;
+  const sideVelocityShort =
+    velocityShort === null ? null : velocityShort * sign;
   const sideVelocityMid = velocityMid === null ? null : velocityMid * sign;
   const sideEmaTrend = emaTrend === null ? null : emaTrend * sign;
   const currentSideGap = sideGap(leg.side, gap);
   const peakRetain =
-    leg.peakSideGap > 0 && currentSideGap > 0 ? currentSideGap / leg.peakSideGap : 0;
+    leg.peakSideGap > 0 && currentSideGap > 0
+      ? currentSideGap / leg.peakSideGap
+      : 0;
   return (
     currentSideGap > 0 &&
     peakRetain >= 0.7 &&
@@ -849,7 +1160,11 @@ function trendSupportsLeg(leg: PortfolioLeg, gap: number, stats: PortfolioStats)
   );
 }
 
-export function updatePortfolioLeg(leg: PortfolioLeg, gap: number, bid: number | null): void {
+export function updatePortfolioLeg(
+  leg: PortfolioLeg,
+  gap: number,
+  bid: number | null,
+): void {
   leg.peakSideGap = Math.max(leg.peakSideGap, sideGap(leg.side, gap));
   if (bid !== null) leg.peakBid = Math.max(leg.peakBid ?? bid, bid);
 }
@@ -873,7 +1188,8 @@ export function portfolioSettlementHoldAllowed(params: {
   });
   const currentSideGap = sideGap(params.leg.side, params.gap);
   const protectedPortfolio =
-    view.balancedShares > 0 && view.guaranteedPnl >= config.settlementMinGuaranteedPnl;
+    view.balancedShares > 0 &&
+    view.guaranteedPnl >= config.settlementMinGuaranteedPnl;
   const strongSingleSide =
     pFair >= config.settlementMinProbability &&
     currentSideGap >= config.settlementMinSideGap;
@@ -901,10 +1217,13 @@ export function shouldExitPortfolioLeg(params: {
   const trendSupports = trendSupportsLeg(leg, gap, stats);
   const currentSideGap = sideGap(leg.side, gap);
   const { velocityShort, emaTrend } = momentumSnapshot(stats);
-  const legVelocity = velocityShort === null ? null : velocityShort * sideSign(leg.side);
+  const legVelocity =
+    velocityShort === null ? null : velocityShort * sideSign(leg.side);
   const legEmaTrend = emaTrend === null ? null : emaTrend * sideSign(leg.side);
   const peakRetain =
-    leg.peakSideGap > 0 && currentSideGap > 0 ? currentSideGap / leg.peakSideGap : 0;
+    leg.peakSideGap > 0 && currentSideGap > 0
+      ? currentSideGap / leg.peakSideGap
+      : 0;
   const trendInvalid =
     currentSideGap <= 0 ||
     (peakRetain < 0.58 &&
@@ -925,15 +1244,34 @@ export function shouldExitPortfolioLeg(params: {
     currentSideGap < -Math.abs(leg.entryGap) * 0.9 &&
     (legVelocity === null || legVelocity < 0)
   ) {
-    return { price, reason: "reversal failed", mode: "reversal-failure", holdMs };
+    return {
+      price,
+      reason: "reversal failed",
+      mode: "reversal-failure",
+      holdMs,
+    };
   }
 
   if (profit !== null && bid !== null) {
     if (profit <= -config.catastrophicLossCents) {
-      return { price: bid, reason: "catastrophic price stop", mode: "catastrophic", holdMs };
+      return {
+        price: bid,
+        reason: "catastrophic price stop",
+        mode: "catastrophic",
+        holdMs,
+      };
     }
-    if (holdMs >= config.minHoldMs && profit <= -config.maxLossCents && !trendSupports) {
-      return { price: bid, reason: "confirmed price stop", mode: "price-stop", holdMs };
+    if (
+      holdMs >= config.minHoldMs &&
+      profit <= -config.maxLossCents &&
+      !trendSupports
+    ) {
+      return {
+        price: bid,
+        reason: "confirmed price stop",
+        mode: "price-stop",
+        holdMs,
+      };
     }
     const peakBid = leg.peakBid ?? bid;
     if (
@@ -941,17 +1279,32 @@ export function shouldExitPortfolioLeg(params: {
       peakBid - leg.entryPrice >= config.profitLockMin &&
       peakBid - bid >= config.trailingDrawdownCents
     ) {
-      return { price: bid, reason: "bid trailing take-profit", mode: "bid-trailing", holdMs };
+      return {
+        price: bid,
+        reason: "bid trailing take-profit",
+        mode: "bid-trailing",
+        holdMs,
+      };
     }
     if (
       profit >= config.takeProfitCents &&
       holdMs >= config.minHoldMs &&
       (!trendSupports || remaining <= 90)
     ) {
-      return { price: bid, reason: "dynamic take-profit", mode: "take-profit", holdMs };
+      return {
+        price: bid,
+        reason: "dynamic take-profit",
+        mode: "take-profit",
+        holdMs,
+      };
     }
     if (remaining <= 45 && profit > 0) {
-      return { price: bid, reason: "final profit lock", mode: "final-profit", holdMs };
+      return {
+        price: bid,
+        reason: "final profit lock",
+        mode: "final-profit",
+        holdMs,
+      };
     }
   }
 
@@ -959,7 +1312,12 @@ export function shouldExitPortfolioLeg(params: {
     leg.trendInvalidSinceMs !== null &&
     now - leg.trendInvalidSinceMs >= config.trendInvalidConfirmMs;
   if (holdMs >= config.minHoldMs && trendInvalidConfirmed) {
-    return { price, reason: "trend invalidated", mode: "trend-invalid", holdMs };
+    return {
+      price,
+      reason: "trend invalidated",
+      mode: "trend-invalid",
+      holdMs,
+    };
   }
   if (remaining <= config.finalExitSeconds) {
     return { price, reason: "final timed exit", mode: "final-exit", holdMs };
@@ -1029,7 +1387,9 @@ function buildMetrics(params: {
     gapAtr: round(params.stats.gapAtr, 6),
     remainingSigma: round(sigma, 6),
     relativeGap:
-      params.gap !== null && sigma !== null ? round(Math.abs(params.gap) / sigma) : null,
+      params.gap !== null && sigma !== null
+        ? round(Math.abs(params.gap) / sigma)
+        : null,
     peakAbsGap: round(params.stats.peakAbsGap),
     peakRetain:
       params.gap !== null && params.stats.peakAbsGap > 0
@@ -1053,14 +1413,18 @@ function buildMetrics(params: {
     bestAskLiquidity: ask?.liquidity ?? null,
     bestBid: bid?.price ?? null,
     bestBidLiquidity: bid?.liquidity ?? null,
-    spread: params.entry?.spread ?? (ask && bid ? round(ask.price - bid.price) : null),
+    spread:
+      params.entry?.spread ??
+      (ask && bid ? round(ask.price - bid.price) : null),
     entryPrice: params.leg?.entryPrice ?? null,
     entryGap: params.leg?.entryGap ?? null,
     entrySideGap: params.leg?.entrySideGap ?? null,
     peakSideGap: params.leg?.peakSideGap ?? null,
     peakBid: params.leg?.peakBid ?? null,
     unrealizedEdge:
-      params.leg && bid?.price !== undefined ? round(bid.price - params.leg.entryPrice) : null,
+      params.leg && bid?.price !== undefined
+        ? round(bid.price - params.leg.entryPrice)
+        : null,
     openLegs: params.state.legs.length,
     pendingEntryCount: params.state.pendingEntryCount,
     pendingUpEntries: params.state.pendingEntrySideCounts.UP,
@@ -1092,14 +1456,23 @@ function releaseOnce(state: PortfolioRuntimeState, release: () => void): void {
   release();
 }
 
-function reservePendingEntry(state: PortfolioRuntimeState, side: PortfolioSide): void {
+function reservePendingEntry(
+  state: PortfolioRuntimeState,
+  side: PortfolioSide,
+): void {
   state.pendingEntryCount++;
   state.pendingEntrySideCounts[side]++;
 }
 
-function releasePendingEntry(state: PortfolioRuntimeState, side: PortfolioSide): void {
+function releasePendingEntry(
+  state: PortfolioRuntimeState,
+  side: PortfolioSide,
+): void {
   state.pendingEntryCount = Math.max(0, state.pendingEntryCount - 1);
-  state.pendingEntrySideCounts[side] = Math.max(0, state.pendingEntrySideCounts[side] - 1);
+  state.pendingEntrySideCounts[side] = Math.max(
+    0,
+    state.pendingEntrySideCounts[side] - 1,
+  );
 }
 
 function placeSell(params: {
@@ -1143,7 +1516,8 @@ function placeSell(params: {
           `[${params.ctx.slug}] probability-portfolio: SELL ${params.leg.side} ${params.leg.model} filled @ ${params.price} (${params.reason})`,
           "green",
         );
-        if (params.state.legs.length === 0) releaseOnce(params.state, params.release);
+        if (params.state.legs.length === 0)
+          releaseOnce(params.state, params.release);
       },
       onExpired() {
         params.ctx.log(
@@ -1158,15 +1532,21 @@ function placeSell(params: {
           params.leg.riskExitAttempts++;
           placeSell({
             ...params,
-            price: bestBid(params.ctx, params.leg.side) ?? Math.max(0.01, params.price - 0.01),
+            price:
+              bestBid(params.ctx, params.leg.side) ??
+              Math.max(0.01, params.price - 0.01),
             reason: `${params.reason} retry ${params.leg.riskExitAttempts}`,
           });
           return;
         }
         const sellIds = params.ctx.pendingOrders
-          .filter((order) => order.action === "sell" && order.tokenId === params.leg.tokenId)
+          .filter(
+            (order) =>
+              order.action === "sell" && order.tokenId === params.leg.tokenId,
+          )
           .map((order) => order.orderId);
-        if (sellIds.length > 0) params.ctx.emergencySells(sellIds).catch(() => {});
+        if (sellIds.length > 0)
+          params.ctx.emergencySells(sellIds).catch(() => {});
       },
       onFailed(reason) {
         params.ctx.log(
@@ -1272,8 +1652,12 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
             action: "buy",
             price: entry.ask,
             shares: CONFIG.shares,
+            orderType: CONFIG.entryOrderType,
           },
-          expireAtMs: Math.min(ctx.slotEndMs - CONFIG.finalExitSeconds * 1000, now + 8_000),
+          expireAtMs: Math.min(
+            ctx.slotEndMs - CONFIG.finalExitSeconds * 1000,
+            now + CONFIG.entryOrderTtlMs,
+          ),
           analysis: {
             signalId,
             label: `probability-portfolio ${entry.model} entry`,
@@ -1283,7 +1667,10 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
                 remaining: Math.floor((ctx.slotEndMs - Date.now()) / 1000),
                 btcPrice: ctx.ticker.price ?? null,
                 priceToBeat,
-                gap: ctx.ticker.price !== undefined ? ctx.ticker.price - priceToBeat : null,
+                gap:
+                  ctx.ticker.price !== undefined
+                    ? ctx.ticker.price - priceToBeat
+                    : null,
                 stats,
                 state,
                 entry,
@@ -1291,8 +1678,7 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
           },
           onFilled(filledShares) {
             releasePendingEntry(state, entry.side);
-            const fillGap =
-              ctx.ticker.price !== undefined ? ctx.ticker.price - priceToBeat : gap;
+            const fillGap = gap;
             const leg: PortfolioLeg = {
               id: `${entry.side}-${entry.model}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
               model: entry.model,
@@ -1384,7 +1770,10 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
           remaining: Math.floor((ctx.slotEndMs - Date.now()) / 1000),
           btcPrice: ctx.ticker.price ?? null,
           priceToBeat,
-          gap: ctx.ticker.price !== undefined ? ctx.ticker.price - priceToBeat : null,
+          gap:
+            ctx.ticker.price !== undefined
+              ? ctx.ticker.price - priceToBeat
+              : null,
           stats,
           state,
           leg,
