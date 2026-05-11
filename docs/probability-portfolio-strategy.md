@@ -18,6 +18,7 @@ bun run index.ts --strategy probability-portfolio --rounds 10 --always-log
 - `reversal` 买当前劣势侧，要求极端偏离后已经出现向 0 回归的速度、加速度或盘口确认。
 - 持仓管理以组合为中心：如果 UP/DOWN 双边已经形成正的最差结算 payoff，临近结算会优先持有组合，而不是机械止损单腿。
 - 默认每个市场最多开 1 条腿，避免在 5m 噪声窗口里反复进出。要更激进地测试组合腿，把 `PP_MAX_ENTRIES_PER_MARKET=2`。
+- 实盘/模拟盘执行层会把已提交但尚未成交的买单计入入场名额，避免 200ms tick 在首笔成交回调前连续追单。
 
 ## 调参入口
 
@@ -48,18 +49,22 @@ bun run backtest:pp
 | `PP_COST_BUFFER` | 执行成本缓冲 | `0.008` |
 | `PP_SIGMA_MULTIPLIER` | 剩余波动放大系数，校准过度自信概率 | `1.4` |
 | `PP_MAX_SPREAD` | 最大 spread | `0.04` |
+| `PP_MIN_EXIT_LIQUIDITY_USD` | 入场时要求同侧可退出 bid 流动性 | `8` |
 | `PP_TAKE_PROFIT_CENTS` | 单腿止盈触发价差 | `0.09` |
 | `PP_MAX_LOSS_CENTS` | 单腿确认止损价差 | `0.05` |
 | `PP_SETTLEMENT_MIN_GUARANTEED_PNL` | 组合结算保护最小保底收益 | `0.06` |
 
 ## 当前日志回放结论
 
-本地 `logs/` 下可回放市场数为 93 个。初始更激进的多腿/重复进场设置在 train 和 validation 表现较好，但 holdout test 明显转负，说明存在 regime shift 或过度交易风险。第二轮修正集中在两点：
+本地 `logs/` 下可回放市场数为 113 个。初始更激进的多腿/重复进场设置在 train 和 validation 表现较好，但早期 holdout test 明显转负，说明存在 regime shift 或过度交易风险。最新模拟盘日志还暴露了一个执行层问题：买单异步提交后、成交回调前，策略会继续看到 `openLegs=0` 并重复发出 continuation 买单。该问题已经通过 pending-entry reservation 修正。
+
+第二轮修正集中在三点：
 
 - `PP_SIGMA_MULTIPLIER=1.4`：放大剩余波动尺度，降低小样本 rolling sigma 造成的过度自信概率。
 - `PP_MAX_LOSS_CENTS=0.05`：压缩 continuation 失效后的单笔亏损尾部。
+- `PP_MIN_EXIT_LIQUIDITY_USD=8`：降低低流动性 bid 下止损滑点和无法退出的概率。
 
-在同一时间切分下，train/validation 选择出的当前默认参数 holdout test 为小幅正收益，但样本只有 19 个市场，不能视为稳定实盘证据。如果要模拟盘偏激测试，优先只调：
+在 113 个市场的时间切分下，train/validation 选择出的当前默认参数 holdout test 仍为正收益，但最新 20 个实盘模拟市场中的大部分收益来自重复追单放大仓位，不能视为稳定实盘证据。修复后应先重新跑一段模拟盘，确认单市场买入笔数恢复到默认 1 笔。
 
 ```bash
 PP_MAX_ENTRIES_PER_MARKET=2

@@ -49,6 +49,33 @@ describe("probability-portfolio entry and payoff", () => {
     expect(entry?.side).toBe("UP");
   });
 
+  test("counts pending entry orders against per-market limits", () => {
+    const config = {
+      ...__probabilityPortfolioTestHooks.readProbabilityPortfolioConfig({}),
+      maxEntriesPerMarket: 1,
+      maxOpenLegs: 1,
+      minContinuationNetEdge: 0.01,
+      minContinuationScore: 0.5,
+    };
+    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
+      remaining: 120,
+      gap: 20,
+      upQuality: quality({ ask: 0.52, bid: 0.51 }),
+      downQuality: quality({ ask: 0.49, bid: 0.48 }),
+      stats: seededStats(),
+      state: {
+        legs: [],
+        realizedCash: 0,
+        openedLegCount: 0,
+        pendingEntryCount: 1,
+        pendingEntrySideCounts: { UP: 1, DOWN: 0 },
+      },
+      config,
+    });
+
+    expect(entry).toBeNull();
+  });
+
   test("computes guaranteed payoff from balanced UP/DOWN legs", () => {
     const view = __probabilityPortfolioTestHooks.portfolioView({
       realizedCash: -5.7,

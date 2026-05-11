@@ -213,6 +213,8 @@ function simulateMarket(market: ReplayMarket, config: PortfolioConfig): {
   const state: PortfolioRuntimeState = {
     legs: [],
     closingLegIds: new Set<string>(),
+    pendingEntryCount: 0,
+    pendingEntrySideCounts: { UP: 0, DOWN: 0 },
     realizedCash: 0,
     released: false,
     settlementHoldLogged: false,
@@ -512,6 +514,7 @@ async function main() {
       `PP_COST_BUFFER=${selectedConfig.costBuffer}`,
       `PP_SIGMA_MULTIPLIER=${selectedConfig.sigmaMultiplier}`,
       `PP_MAX_SPREAD=${selectedConfig.maxSpread}`,
+      `PP_MIN_EXIT_LIQUIDITY_USD=${selectedConfig.minExitLiquidityUsd}`,
       `PP_TAKE_PROFIT_CENTS=${selectedConfig.takeProfitCents}`,
       `PP_MAX_LOSS_CENTS=${selectedConfig.maxLossCents}`,
       `PP_CATASTROPHIC_LOSS_CENTS=${selectedConfig.catastrophicLossCents}`,

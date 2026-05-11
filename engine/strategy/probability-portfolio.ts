@@ -113,6 +113,8 @@ export type PortfolioLeg = {
 export type PortfolioRuntimeState = {
   legs: PortfolioLeg[];
   closingLegIds: Set<string>;
+  pendingEntryCount: number;
+  pendingEntrySideCounts: Record<PortfolioSide, number>;
   realizedCash: number;
   released: boolean;
   settlementHoldLogged: boolean;
@@ -160,6 +162,12 @@ export type PortfolioEntryDecision = {
 
 const EPSILON = 1e-9;
 
+type EntryLimitState = Pick<PortfolioRuntimeState, "legs"> & {
+  openedLegCount?: number;
+  pendingEntryCount?: number;
+  pendingEntrySideCounts?: Partial<Record<PortfolioSide, number>>;
+};
+
 function parseNumberEnv(
   env: Record<string, string | undefined>,
   key: string,
@@ -191,7 +199,7 @@ export function readProbabilityPortfolioConfig(
     maxReversalAsk: Math.min(0.99, parseNumberEnv(env, "PP_MAX_REVERSAL_ASK", 0.58)),
     maxSpread: Math.max(0, parseNumberEnv(env, "PP_MAX_SPREAD", 0.04)),
     minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "PP_MIN_ENTRY_LIQUIDITY_USD", 8)),
-    minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "PP_MIN_EXIT_LIQUIDITY_USD", 4)),
+    minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "PP_MIN_EXIT_LIQUIDITY_USD", 8)),
     costBuffer: Math.max(0, parseNumberEnv(env, "PP_COST_BUFFER", 0.008)),
     sigmaMultiplier: Math.max(1, parseNumberEnv(env, "PP_SIGMA_MULTIPLIER", 1.4)),
     projectionSeconds: Math.max(0, parseNumberEnv(env, "PP_PROJECTION_SECONDS", 20)),
@@ -522,14 +530,20 @@ function marketPassesCommonFilters(
 
 function canAddLeg(params: {
   side: PortfolioSide;
-  state: Pick<PortfolioRuntimeState, "legs"> & { openedLegCount?: number };
+  state: EntryLimitState;
   config: PortfolioConfig;
 }): boolean {
-  if ((params.state.openedLegCount ?? params.state.legs.length) >= params.config.maxEntriesPerMarket) {
+  const pendingEntryCount = params.state.pendingEntryCount ?? 0;
+  if (
+    (params.state.openedLegCount ?? params.state.legs.length) + pendingEntryCount >=
+    params.config.maxEntriesPerMarket
+  ) {
     return false;
   }
-  if (params.state.legs.length >= params.config.maxOpenLegs) return false;
-  const sameSide = params.state.legs.filter((leg) => leg.side === params.side).length;
+  if (params.state.legs.length + pendingEntryCount >= params.config.maxOpenLegs) return false;
+  const sameSide =
+    params.state.legs.filter((leg) => leg.side === params.side).length +
+    (params.state.pendingEntrySideCounts?.[params.side] ?? 0);
   return sameSide < params.config.maxSameSideLegs;
 }
 
@@ -578,7 +592,7 @@ function evaluateContinuation(params: {
   remaining: number;
   quality: BookQuality;
   stats: PortfolioStats;
-  state: Pick<PortfolioRuntimeState, "legs" | "realizedCash"> & { openedLegCount?: number };
+  state: EntryLimitState & Pick<PortfolioRuntimeState, "realizedCash">;
   config: PortfolioConfig;
 }): PortfolioEntryDecision | null {
   const { side, gap, remaining, quality, stats, state, config } = params;
@@ -674,7 +688,7 @@ function evaluateReversal(params: {
   remaining: number;
   quality: BookQuality;
   stats: PortfolioStats;
-  state: Pick<PortfolioRuntimeState, "legs" | "realizedCash"> & { openedLegCount?: number };
+  state: EntryLimitState & Pick<PortfolioRuntimeState, "realizedCash">;
   config: PortfolioConfig;
 }): PortfolioEntryDecision | null {
   const { side, gap, remaining, quality, stats, state, config } = params;
@@ -772,7 +786,7 @@ export function choosePortfolioEntry(params: {
   upQuality: BookQuality | null;
   downQuality: BookQuality | null;
   stats: PortfolioStats;
-  state: Pick<PortfolioRuntimeState, "legs" | "realizedCash"> & { openedLegCount?: number };
+  state: EntryLimitState & Pick<PortfolioRuntimeState, "realizedCash">;
   config?: PortfolioConfig;
 }): PortfolioEntryDecision | null {
   const config = params.config ?? CONFIG;
@@ -1048,6 +1062,9 @@ function buildMetrics(params: {
     unrealizedEdge:
       params.leg && bid?.price !== undefined ? round(bid.price - params.leg.entryPrice) : null,
     openLegs: params.state.legs.length,
+    pendingEntryCount: params.state.pendingEntryCount,
+    pendingUpEntries: params.state.pendingEntrySideCounts.UP,
+    pendingDownEntries: params.state.pendingEntrySideCounts.DOWN,
     upShares: round(view.upShares),
     downShares: round(view.downShares),
     realizedCash: round(view.realizedCash),
@@ -1073,6 +1090,16 @@ function releaseOnce(state: PortfolioRuntimeState, release: () => void): void {
   if (state.released) return;
   state.released = true;
   release();
+}
+
+function reservePendingEntry(state: PortfolioRuntimeState, side: PortfolioSide): void {
+  state.pendingEntryCount++;
+  state.pendingEntrySideCounts[side]++;
+}
+
+function releasePendingEntry(state: PortfolioRuntimeState, side: PortfolioSide): void {
+  state.pendingEntryCount = Math.max(0, state.pendingEntryCount - 1);
+  state.pendingEntrySideCounts[side] = Math.max(0, state.pendingEntrySideCounts[side] - 1);
 }
 
 function placeSell(params: {
@@ -1168,6 +1195,8 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
   const state: PortfolioRuntimeState = {
     legs: [],
     closingLegIds: new Set<string>(),
+    pendingEntryCount: 0,
+    pendingEntrySideCounts: { UP: 0, DOWN: 0 },
     realizedCash: 0,
     released: false,
     settlementHoldLogged: false,
@@ -1235,6 +1264,7 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
         `[${ctx.slug}] probability-portfolio: signal BUY ${entry.side} ${entry.model} @ ${entry.ask} score ${entry.score}`,
         "cyan",
       );
+      reservePendingEntry(state, entry.side);
       ctx.postOrders([
         {
           req: {
@@ -1260,6 +1290,7 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
               }),
           },
           onFilled(filledShares) {
+            releasePendingEntry(state, entry.side);
             const fillGap =
               ctx.ticker.price !== undefined ? ctx.ticker.price - priceToBeat : gap;
             const leg: PortfolioLeg = {
@@ -1292,6 +1323,7 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
             );
           },
           onExpired() {
+            releasePendingEntry(state, entry.side);
             ctx.log(
               `[${ctx.slug}] probability-portfolio: BUY ${entry.side} @ ${entry.ask} expired`,
               "yellow",
@@ -1299,6 +1331,7 @@ export const probabilityPortfolio: Strategy = async (ctx) => {
             if (state.legs.length === 0) releaseOnce(state, release);
           },
           onFailed(reason) {
+            releasePendingEntry(state, entry.side);
             ctx.log(
               `[${ctx.slug}] probability-portfolio: BUY ${entry.side} failed (${reason})`,
               "red",
