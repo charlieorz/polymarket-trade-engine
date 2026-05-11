@@ -147,6 +147,105 @@ describe("probability-portfolio entry and payoff", () => {
     expect(entry).toBeNull();
   });
 
+  test("allows one reversal and one continuation on the same side", () => {
+    const config = {
+      ...__probabilityPortfolioTestHooks.readProbabilityPortfolioConfig({}),
+      allowOppositeSides: true,
+      maxOpenLegs: 2,
+      maxSameSideLegs: 2,
+      maxEntriesPerMarket: 2,
+      maxSameModelEntries: 1,
+      minContinuationNetEdge: 0.01,
+      minContinuationScore: 0.5,
+    };
+    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
+      remaining: 120,
+      gap: 20,
+      upQuality: quality({ ask: 0.52, bid: 0.51 }),
+      downQuality: quality({ ask: 0.49, bid: 0.48 }),
+      stats: seededStats(),
+      state: {
+        legs: [
+          {
+            id: "up-reversal",
+            model: "reversal",
+            side: "UP",
+            tokenId: "up",
+            entryPrice: 0.4,
+            entryGap: -12,
+            entrySideGap: 12,
+            entryMs: 1,
+            shares: 6,
+            pFairEntry: 0.7,
+            netEdgeEntry: 0.1,
+            scoreEntry: 0.7,
+            takeProfitPrice: 0.5,
+            stopLossPrice: 0.33,
+            peakSideGap: 12,
+            peakBid: 0.45,
+            trendInvalidSinceMs: null,
+            riskExitAttempts: 0,
+          },
+        ],
+        realizedCash: -2.4,
+        openedLegCount: 1,
+      },
+      config,
+    });
+
+    expect(entry?.model).toBe("continuation");
+    expect(entry?.side).toBe("UP");
+  });
+
+  test("blocks repeated continuation chasing in the same market", () => {
+    const config = {
+      ...__probabilityPortfolioTestHooks.readProbabilityPortfolioConfig({}),
+      allowOppositeSides: true,
+      maxOpenLegs: 2,
+      maxSameSideLegs: 2,
+      maxEntriesPerMarket: 2,
+      maxSameModelEntries: 1,
+      minContinuationNetEdge: 0.01,
+      minContinuationScore: 0.5,
+    };
+    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
+      remaining: 120,
+      gap: 20,
+      upQuality: quality({ ask: 0.52, bid: 0.51 }),
+      downQuality: quality({ ask: 0.49, bid: 0.48 }),
+      stats: seededStats(),
+      state: {
+        legs: [
+          {
+            id: "up-continuation",
+            model: "continuation",
+            side: "UP",
+            tokenId: "up",
+            entryPrice: 0.5,
+            entryGap: 12,
+            entrySideGap: 12,
+            entryMs: 1,
+            shares: 6,
+            pFairEntry: 0.7,
+            netEdgeEntry: 0.1,
+            scoreEntry: 0.7,
+            takeProfitPrice: 0.6,
+            stopLossPrice: 0.43,
+            peakSideGap: 12,
+            peakBid: 0.55,
+            trendInvalidSinceMs: null,
+            riskExitAttempts: 0,
+          },
+        ],
+        realizedCash: -3,
+        openedLegCount: 1,
+      },
+      config,
+    });
+
+    expect(entry).toBeNull();
+  });
+
   test("computes guaranteed payoff from balanced UP/DOWN legs", () => {
     const view = __probabilityPortfolioTestHooks.portfolioView({
       realizedCash: -5.7,

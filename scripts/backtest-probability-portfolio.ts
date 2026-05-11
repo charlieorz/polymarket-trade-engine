@@ -69,6 +69,7 @@ type ReplayResult = {
 
 type Variant = {
   name: string;
+  profile: "conservative" | "neutral" | "aggressive";
   config: PortfolioConfig;
 };
 
@@ -232,6 +233,7 @@ function simulateMarket(
     closingLegIds: new Set<string>(),
     pendingEntryCount: 0,
     pendingEntrySideCounts: { UP: 0, DOWN: 0 },
+    pendingEntryModelCounts: { continuation: 0, reversal: 0 },
     realizedCash: 0,
     released: false,
     settlementHoldLogged: false,
@@ -241,6 +243,7 @@ function simulateMarket(
   let settlementHeld = 0;
 
   for (const sample of market.samples) {
+    const enteredLegIds = new Set<string>();
     __probabilityPortfolioTestHooks.updatePortfolioStats({
       stats,
       now: sample.ts,
@@ -251,7 +254,25 @@ function simulateMarket(
       config,
     });
 
+    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
+      remaining: sample.remaining,
+      gap: sample.gap,
+      upQuality: sample.upQuality,
+      downQuality: sample.downQuality,
+      stats,
+      state,
+      config,
+    });
+    if (entry) {
+      const leg = makeLeg({ market, entry, sample, config });
+      state.realizedCash -= entry.ask * config.shares;
+      state.openedLegCount++;
+      state.legs.push(leg);
+      enteredLegIds.add(leg.id);
+    }
+
     for (const leg of [...state.legs]) {
+      if (enteredLegIds.has(leg.id)) continue;
       const quality = leg.side === "UP" ? sample.upQuality : sample.downQuality;
       const bid = quality?.bid ?? null;
       __probabilityPortfolioTestHooks.updatePortfolioLeg(leg, sample.gap, bid);
@@ -286,21 +307,6 @@ function simulateMarket(
         reason: exit.mode,
       });
     }
-
-    const entry = __probabilityPortfolioTestHooks.choosePortfolioEntry({
-      remaining: sample.remaining,
-      gap: sample.gap,
-      upQuality: sample.upQuality,
-      downQuality: sample.downQuality,
-      stats,
-      state,
-      config,
-    });
-    if (!entry) continue;
-
-    state.realizedCash -= entry.ask * config.shares;
-    state.openedLegCount++;
-    state.legs.push(makeLeg({ market, entry, sample, config }));
   }
 
   const heldLegs = [...state.legs];
@@ -385,77 +391,124 @@ function summarize(
 
 function buildVariants(base: PortfolioConfig): Variant[] {
   const variants: Variant[] = [];
-  const continuationEdges = [0.02, 0.04];
-  const reversalEdges = [0.03, 0.05];
-  const continuationScores = [0.62, 0.7];
-  const reversalScores = [0.6];
-  const continuationPeakRetains = [0.82, 0.9];
-  const continuationShortVelocities = [1.1, 2.2];
-  const continuationMidVelocities = [2.5, 5];
-  const continuationFlatTicks = [0, 1];
-  const reversalVelocities = [1.2, 2.4];
-  const costBuffers = [0.012];
-  const sigmaMultipliers = [2.0, 2.6];
-  const maxSpreads = [0.03];
-  const takeProfits = [0.07, 0.1];
-  const maxLosses = [0.05, 0.08];
+  const profiles: Array<{
+    profile: Variant["profile"];
+    continuationEdges: number[];
+    reversalEdges: number[];
+    continuationScores: number[];
+    reversalScores: number[];
+    peakRetains: number[];
+    shortVelocities: number[];
+    midVelocities: number[];
+    flatTicks: number[];
+    reversalVelocities: number[];
+    sigmaMultipliers: number[];
+    takeProfits: number[];
+    maxLosses: number[];
+  }> = [
+    {
+      profile: "conservative",
+      continuationEdges: [0.04, 0.06],
+      reversalEdges: [0.05, 0.07],
+      continuationScores: [0.7, 0.76],
+      reversalScores: [0.66, 0.72],
+      peakRetains: [0.9, 0.95],
+      shortVelocities: [2.2, 3.4],
+      midVelocities: [5, 7],
+      flatTicks: [0],
+      reversalVelocities: [2.4, 3.6],
+      sigmaMultipliers: [2.6, 3.0],
+      takeProfits: [0.08, 0.1],
+      maxLosses: [0.05, 0.07],
+    },
+    {
+      profile: "neutral",
+      continuationEdges: [0.025, 0.04],
+      reversalEdges: [0.035, 0.055],
+      continuationScores: [0.64, 0.7],
+      reversalScores: [0.6, 0.66],
+      peakRetains: [0.84, 0.9],
+      shortVelocities: [1.4, 2.2],
+      midVelocities: [3, 5],
+      flatTicks: [0, 1],
+      reversalVelocities: [1.6, 2.4],
+      sigmaMultipliers: [2.2, 2.6],
+      takeProfits: [0.08, 0.1],
+      maxLosses: [0.06, 0.08],
+    },
+    {
+      profile: "aggressive",
+      continuationEdges: [0.015, 0.025],
+      reversalEdges: [0.02, 0.035],
+      continuationScores: [0.58, 0.64],
+      reversalScores: [0.54, 0.6],
+      peakRetains: [0.78, 0.84],
+      shortVelocities: [0.8, 1.4],
+      midVelocities: [1.8, 3],
+      flatTicks: [1, 2],
+      reversalVelocities: [0.8, 1.6],
+      sigmaMultipliers: [1.8, 2.2],
+      takeProfits: [0.07, 0.1],
+      maxLosses: [0.08, 0.1],
+    },
+  ];
 
-  for (const minContinuationNetEdge of continuationEdges) {
-    for (const minReversalNetEdge of reversalEdges) {
-      for (const minContinuationScore of continuationScores) {
-        for (const minReversalScore of reversalScores) {
-          for (const minContinuationPeakRetain of continuationPeakRetains) {
-            for (const minContinuationSideVelocityShort of continuationShortVelocities) {
-              for (const minContinuationSideVelocityMid of continuationMidVelocities) {
-                for (const maxContinuationFlatTicks of continuationFlatTicks) {
-                  for (const minReversalVelocityTowardZero of reversalVelocities) {
-                    for (const costBuffer of costBuffers) {
-                      for (const maxSpread of maxSpreads) {
-                        for (const sigmaMultiplier of sigmaMultipliers) {
-                          for (const takeProfitCents of takeProfits) {
-                            for (const maxLossCents of maxLosses) {
-                              variants.push({
-                                name:
-                                  `ce${minContinuationNetEdge}` +
-                                  `_re${minReversalNetEdge}` +
-                                  `_cs${minContinuationScore}` +
-                                  `_rs${minReversalScore}` +
-                                  `_pr${minContinuationPeakRetain}` +
-                                  `_vs${minContinuationSideVelocityShort}` +
-                                  `_vm${minContinuationSideVelocityMid}` +
-                                  `_flat${maxContinuationFlatTicks}` +
-                                  `_rv${minReversalVelocityTowardZero}` +
-                                  `_cb${costBuffer}` +
-                                  `_sm${sigmaMultiplier}` +
-                                  `_sp${maxSpread}` +
-                                  `_tp${takeProfitCents}` +
-                                  `_sl${maxLossCents}`,
-                                config: {
-                                  ...base,
-                                  allowOppositeSides: false,
-                                  maxOpenLegs: 1,
-                                  maxEntriesPerMarket: 1,
-                                  minContinuationNetEdge,
-                                  minReversalNetEdge,
-                                  minContinuationScore,
-                                  minReversalScore,
-                                  minContinuationPeakRetain,
-                                  minContinuationSideVelocityShort,
-                                  minContinuationSideVelocityMid,
-                                  maxContinuationFlatTicks,
-                                  minReversalVelocityTowardZero,
-                                  costBuffer,
-                                  sigmaMultiplier,
-                                  maxSpread,
-                                  takeProfitCents,
-                                  maxLossCents,
-                                  catastrophicLossCents: Math.max(
-                                    base.catastrophicLossCents,
-                                    maxLossCents * 1.8,
-                                  ),
-                                },
-                              });
-                            }
+  for (const profile of profiles) {
+    for (const minContinuationNetEdge of profile.continuationEdges) {
+      for (const minReversalNetEdge of profile.reversalEdges) {
+        for (const minContinuationScore of profile.continuationScores) {
+          for (const minReversalScore of profile.reversalScores) {
+            for (const minContinuationPeakRetain of profile.peakRetains) {
+              for (const minContinuationSideVelocityShort of profile.shortVelocities) {
+                for (const minContinuationSideVelocityMid of profile.midVelocities) {
+                  for (const maxContinuationFlatTicks of profile.flatTicks) {
+                    for (const minReversalVelocityTowardZero of profile.reversalVelocities) {
+                      for (const sigmaMultiplier of profile.sigmaMultipliers) {
+                        for (const takeProfitCents of profile.takeProfits) {
+                          for (const maxLossCents of profile.maxLosses) {
+                            variants.push({
+                              profile: profile.profile,
+                              name:
+                                `${profile.profile}` +
+                                `_ce${minContinuationNetEdge}` +
+                                `_re${minReversalNetEdge}` +
+                                `_cs${minContinuationScore}` +
+                                `_rs${minReversalScore}` +
+                                `_pr${minContinuationPeakRetain}` +
+                                `_vs${minContinuationSideVelocityShort}` +
+                                `_vm${minContinuationSideVelocityMid}` +
+                                `_flat${maxContinuationFlatTicks}` +
+                                `_rv${minReversalVelocityTowardZero}` +
+                                `_sm${sigmaMultiplier}` +
+                                `_tp${takeProfitCents}` +
+                                `_sl${maxLossCents}`,
+                              config: {
+                                ...base,
+                                allowOppositeSides: true,
+                                maxOpenLegs: 2,
+                                maxSameSideLegs: 2,
+                                maxEntriesPerMarket: 2,
+                                maxSameModelEntries: 1,
+                                minContinuationNetEdge,
+                                minReversalNetEdge,
+                                minContinuationScore,
+                                minReversalScore,
+                                minContinuationPeakRetain,
+                                minContinuationSideVelocityShort,
+                                minContinuationSideVelocityMid,
+                                maxContinuationFlatTicks,
+                                minReversalVelocityTowardZero,
+                                costBuffer: 0.012,
+                                sigmaMultiplier,
+                                maxSpread: 0.03,
+                                takeProfitCents,
+                                maxLossCents,
+                                catastrophicLossCents: Math.max(
+                                  base.catastrophicLossCents,
+                                  maxLossCents * 1.8,
+                                ),
+                              },
+                            });
                           }
                         }
                       }
@@ -474,12 +527,13 @@ function buildVariants(base: PortfolioConfig): Variant[] {
 
 function printResult(
   label: string,
-  rows: Array<{ name: string; result: ReplayResult }>,
+  rows: Array<{ name: string; profile?: string; result: ReplayResult }>,
   limit = 10,
 ): void {
   console.log(`\n${label}`);
   console.table(
     rows.slice(0, limit).map((row) => ({
+      profile: row.profile,
       name: row.name,
       pnl: row.result.pnl,
       score: row.result.score,
@@ -524,6 +578,7 @@ async function main() {
   const trainRows = variants
     .map((variant) => ({
       name: variant.name,
+      profile: variant.profile,
       variant,
       result: summarize(train, variant.config),
     }))
@@ -535,9 +590,9 @@ async function main() {
   printResult("Top train candidates", trainRows);
 
   const validationRows = trainRows
-    .slice(0, 25)
     .map((row) => ({
       name: row.name,
+      profile: row.profile,
       variant: row.variant,
       result: summarize(validation, row.variant.config),
       trainResult: row.result,
@@ -545,60 +600,86 @@ async function main() {
     .sort((a, b) => b.result.score - a.result.score);
   printResult("Validation ranking from top train candidates", validationRows);
 
-  const selected = validationRows[0];
-  if (!selected) throw new Error("no candidate survived validation");
+  if (validationRows.length === 0)
+    throw new Error("no candidate survived validation");
+  const selectedRows = [
+    { label: "best-validation", row: validationRows[0]! },
+    {
+      label: "median-validation",
+      row: validationRows[Math.floor(validationRows.length / 2)]!,
+    },
+    {
+      label: "worst-validation",
+      row: validationRows[validationRows.length - 1]!,
+    },
+  ];
 
-  const testResult = summarize(test, selected.variant.config, {
-    includeTrades: process.env.PP_BACKTEST_DUMP_TRADES === "1",
-  });
+  const testRows = selectedRows.map((selected) => ({
+    name: `${selected.label}:${selected.row.name}`,
+    profile: selected.row.profile,
+    result: summarize(test, selected.row.variant.config, {
+      includeTrades: process.env.PP_BACKTEST_DUMP_TRADES === "1",
+    }),
+    selected,
+  }));
   printResult(
-    "Final holdout test",
-    [{ name: selected.name, result: testResult }],
-    1,
+    "Final holdout test for validation best / median / worst",
+    testRows,
+    3,
   );
-  if (testResult.tradesDetail) {
-    console.log("\nFinal holdout trades:");
-    console.table(
-      testResult.tradesDetail.map((trade) => ({
-        market: trade.market,
-        side: trade.side,
-        model: trade.model,
-        entry: trade.entryPrice,
-        exit: trade.exitPrice ?? "settle",
-        gap: trade.entryGap,
-        pFair: trade.pFairEntry,
-        edge: trade.netEdgeEntry,
-        score: trade.scoreEntry,
-        pnl: trade.pnl,
-        reason: trade.reason,
-      })),
-    );
+  if (process.env.PP_BACKTEST_DUMP_TRADES === "1") {
+    for (const testRow of testRows) {
+      if (!testRow.result.tradesDetail) continue;
+      console.log(`\nFinal holdout trades (${testRow.name}):`);
+      console.table(
+        testRow.result.tradesDetail.map((trade) => ({
+          market: trade.market,
+          side: trade.side,
+          model: trade.model,
+          entry: trade.entryPrice,
+          exit: trade.exitPrice ?? "settle",
+          gap: trade.entryGap,
+          pFair: trade.pFairEntry,
+          edge: trade.netEdgeEntry,
+          score: trade.scoreEntry,
+          pnl: trade.pnl,
+          reason: trade.reason,
+        })),
+      );
+    }
   }
   console.log("\nSelected env overrides:");
-  const selectedConfig = selected.variant.config;
-  console.log(
-    [
-      `PP_MIN_CONTINUATION_NET_EDGE=${selectedConfig.minContinuationNetEdge}`,
-      `PP_MIN_REVERSAL_NET_EDGE=${selectedConfig.minReversalNetEdge}`,
-      `PP_MIN_CONTINUATION_SCORE=${selectedConfig.minContinuationScore}`,
-      `PP_MIN_REVERSAL_SCORE=${selectedConfig.minReversalScore}`,
-      `PP_ALLOW_OPPOSITE_SIDES=${selectedConfig.allowOppositeSides}`,
-      `PP_MAX_OPEN_LEGS=${selectedConfig.maxOpenLegs}`,
-      `PP_MAX_ENTRIES_PER_MARKET=${selectedConfig.maxEntriesPerMarket}`,
-      `PP_MIN_CONTINUATION_PEAK_RETAIN=${selectedConfig.minContinuationPeakRetain}`,
-      `PP_MIN_CONTINUATION_SIDE_VELOCITY_SHORT=${selectedConfig.minContinuationSideVelocityShort}`,
-      `PP_MIN_CONTINUATION_SIDE_VELOCITY_MID=${selectedConfig.minContinuationSideVelocityMid}`,
-      `PP_MAX_CONTINUATION_FLAT_TICKS=${selectedConfig.maxContinuationFlatTicks}`,
-      `PP_MIN_REVERSAL_VELOCITY_TOWARD_ZERO=${selectedConfig.minReversalVelocityTowardZero}`,
-      `PP_COST_BUFFER=${selectedConfig.costBuffer}`,
-      `PP_SIGMA_MULTIPLIER=${selectedConfig.sigmaMultiplier}`,
-      `PP_MAX_SPREAD=${selectedConfig.maxSpread}`,
-      `PP_MIN_EXIT_LIQUIDITY_USD=${selectedConfig.minExitLiquidityUsd}`,
-      `PP_TAKE_PROFIT_CENTS=${selectedConfig.takeProfitCents}`,
-      `PP_MAX_LOSS_CENTS=${selectedConfig.maxLossCents}`,
-      `PP_CATASTROPHIC_LOSS_CENTS=${selectedConfig.catastrophicLossCents}`,
-    ].join("\n"),
-  );
+  for (const selected of selectedRows) {
+    const selectedConfig = selected.row.variant.config;
+    console.log(
+      `\n# ${selected.label} (${selected.row.profile}) ${selected.row.name}`,
+    );
+    console.log(
+      [
+        `PP_MIN_CONTINUATION_NET_EDGE=${selectedConfig.minContinuationNetEdge}`,
+        `PP_MIN_REVERSAL_NET_EDGE=${selectedConfig.minReversalNetEdge}`,
+        `PP_MIN_CONTINUATION_SCORE=${selectedConfig.minContinuationScore}`,
+        `PP_MIN_REVERSAL_SCORE=${selectedConfig.minReversalScore}`,
+        `PP_ALLOW_OPPOSITE_SIDES=${selectedConfig.allowOppositeSides}`,
+        `PP_MAX_OPEN_LEGS=${selectedConfig.maxOpenLegs}`,
+        `PP_MAX_SAME_SIDE_LEGS=${selectedConfig.maxSameSideLegs}`,
+        `PP_MAX_ENTRIES_PER_MARKET=${selectedConfig.maxEntriesPerMarket}`,
+        `PP_MAX_SAME_MODEL_ENTRIES=${selectedConfig.maxSameModelEntries}`,
+        `PP_MIN_CONTINUATION_PEAK_RETAIN=${selectedConfig.minContinuationPeakRetain}`,
+        `PP_MIN_CONTINUATION_SIDE_VELOCITY_SHORT=${selectedConfig.minContinuationSideVelocityShort}`,
+        `PP_MIN_CONTINUATION_SIDE_VELOCITY_MID=${selectedConfig.minContinuationSideVelocityMid}`,
+        `PP_MAX_CONTINUATION_FLAT_TICKS=${selectedConfig.maxContinuationFlatTicks}`,
+        `PP_MIN_REVERSAL_VELOCITY_TOWARD_ZERO=${selectedConfig.minReversalVelocityTowardZero}`,
+        `PP_COST_BUFFER=${selectedConfig.costBuffer}`,
+        `PP_SIGMA_MULTIPLIER=${selectedConfig.sigmaMultiplier}`,
+        `PP_MAX_SPREAD=${selectedConfig.maxSpread}`,
+        `PP_MIN_EXIT_LIQUIDITY_USD=${selectedConfig.minExitLiquidityUsd}`,
+        `PP_TAKE_PROFIT_CENTS=${selectedConfig.takeProfitCents}`,
+        `PP_MAX_LOSS_CENTS=${selectedConfig.maxLossCents}`,
+        `PP_CATASTROPHIC_LOSS_CENTS=${selectedConfig.catastrophicLossCents}`,
+      ].join("\n"),
+    );
+  }
 }
 
 main().catch((error) => {
