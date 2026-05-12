@@ -33,6 +33,7 @@ type ReplayMarket = {
     direction: PortfolioSide;
     openPrice: number;
     closePrice: number;
+    source: "explicit" | "inferred";
   } | null;
 };
 
@@ -55,6 +56,8 @@ type ReplayTrade = {
 
 type ReplayResult = {
   markets: number;
+  explicitResolutionMarkets: number;
+  inferredResolutionMarkets: number;
   tradedMarkets: number;
   trades: number;
   pnl: number;
@@ -74,9 +77,40 @@ type Variant = {
 };
 
 const LOG_DIR = process.env.PP_BACKTEST_LOG_DIR ?? "logs";
+const SPLIT_SEED = process.env.PP_BACKTEST_SPLIT_SEED ?? "probability-2026-05-12";
 
 function round(value: number, digits = 4): number {
   return Number(value.toFixed(digits));
+}
+
+function seedHash(seed: string): number {
+  let hash = 2166136261;
+  for (const char of seed) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seededRandom(seed: string): () => number {
+  let state = seedHash(seed) || 1;
+  return () => {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffled<T>(items: T[], seed: string): T[] {
+  const random = seededRandom(seed);
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [result[i], result[j]] = [result[j]!, result[i]!];
+  }
+  return result;
 }
 
 function bestQuality(book: BookSide): BookQuality | null {
@@ -119,6 +153,7 @@ async function loadMarket(path: string): Promise<ReplayMarket | null> {
   let latestBook: BookSnapshot | null = null;
   let latestRemaining: number | null = null;
   let resolution: ReplayMarket["resolution"] = null;
+  let reachedSlotEnd = false;
   const samples: ReplaySample[] = [];
 
   for (const rawLine of text.split(/\n+/)) {
@@ -136,6 +171,10 @@ async function loadMarket(path: string): Promise<ReplayMarket | null> {
       slotEndMs = Number(entry.endTime ?? 0);
       continue;
     }
+    if (entry.type === "slot" && entry.action === "end") {
+      reachedSlotEnd = true;
+      continue;
+    }
     if (entry.type === "orderbook_snapshot") {
       latestBook = { up: entry.up ?? null, down: entry.down ?? null };
       continue;
@@ -150,6 +189,7 @@ async function loadMarket(path: string): Promise<ReplayMarket | null> {
           direction: entry.direction,
           openPrice: Number(entry.openPrice),
           closePrice: Number(entry.closePrice),
+          source: "explicit",
         };
       }
       continue;
@@ -180,7 +220,17 @@ async function loadMarket(path: string): Promise<ReplayMarket | null> {
     });
   }
 
-  if (samples.length < 20 || resolution === null) return null;
+  if (samples.length < 20) return null;
+  if (resolution === null) {
+    const last = samples.at(-1)!;
+    if (!reachedSlotEnd && last.remaining > 5) return null;
+    resolution = {
+      direction: last.gap >= 0 ? "UP" : "DOWN",
+      openPrice: last.priceToBeat,
+      closePrice: last.price,
+      source: "inferred",
+    };
+  }
   if (slotEndMs === 0) {
     const slugEnd = Number(slug.split("-").at(-1));
     slotEndMs = Number.isFinite(slugEnd) ? slugEnd * 1000 : samples.at(-1)!.ts;
@@ -357,8 +407,12 @@ function summarize(
   let settlementHeld = 0;
   const trades: ReplayTrade[] = [];
   let tradedMarkets = 0;
+  let explicitResolutionMarkets = 0;
+  let inferredResolutionMarkets = 0;
 
   for (const market of markets) {
+    if (market.resolution?.source === "explicit") explicitResolutionMarkets++;
+    if (market.resolution?.source === "inferred") inferredResolutionMarkets++;
     const result = simulateMarket(market, config);
     pnl += result.pnl;
     equity += result.pnl;
@@ -373,9 +427,23 @@ function summarize(
   const winRate = trades.length > 0 ? wins / trades.length : 0;
   const avgPnlPerMarket = markets.length > 0 ? pnl / markets.length : 0;
   const avgPnlPerTrade = trades.length > 0 ? pnl / trades.length : 0;
-  const score = pnl - maxDrawdown * 0.35 + avgPnlPerTrade * 8 + winRate;
+  const coverage = markets.length > 0 ? tradedMarkets / markets.length : 0;
+  const coverageScore = Math.min(1, coverage / 0.14);
+  const underTradePenalty =
+    tradedMarkets < Math.max(4, Math.floor(markets.length * 0.08))
+      ? (Math.max(4, Math.floor(markets.length * 0.08)) - tradedMarkets) * 0.35
+      : 0;
+  const score =
+    pnl -
+    maxDrawdown * 0.4 +
+    avgPnlPerTrade * 5 +
+    winRate +
+    coverageScore -
+    underTradePenalty;
   return {
     markets: markets.length,
+    explicitResolutionMarkets,
+    inferredResolutionMarkets,
     tradedMarkets,
     trades: trades.length,
     pnl: round(pnl, 4),
@@ -393,130 +461,187 @@ function buildVariants(base: PortfolioConfig): Variant[] {
   const variants: Variant[] = [];
   const profiles: Array<{
     profile: Variant["profile"];
-    continuationEdges: number[];
-    reversalEdges: number[];
-    continuationScores: number[];
-    reversalScores: number[];
-    peakRetains: number[];
-    shortVelocities: number[];
-    midVelocities: number[];
-    flatTicks: number[];
-    reversalVelocities: number[];
-    sigmaMultipliers: number[];
-    takeProfits: number[];
-    maxLosses: number[];
+    continuationEdge: number;
+    reversalEdge: number;
+    continuationScore: number;
+    reversalScore: number;
+    continuationAbsGap: number;
+    reversalAbsGap: number;
+    continuationRelativeGap: number;
+    reversalRelativeGap: number;
+    peakRetain: number;
+    reversalRetrace: number;
+    maxReversalRetrace: number;
+    shortVelocity: number;
+    midVelocity: number;
+    continuationVotes: number;
+    reversalVelocity: number;
+    reversalVotes: number;
+    flatTicks: number;
+    sigmaMultiplier: number;
+    maxContinuationAsk: number;
+    maxReversalAsk: number;
+    maxSpread: number;
+    takeProfit: number;
+    maxLoss: number;
   }> = [
     {
       profile: "conservative",
-      continuationEdges: [0.04, 0.06],
-      reversalEdges: [0.05, 0.07],
-      continuationScores: [0.7, 0.76],
-      reversalScores: [0.66, 0.72],
-      peakRetains: [0.9, 0.95],
-      shortVelocities: [2.2, 3.4],
-      midVelocities: [5, 7],
-      flatTicks: [0],
-      reversalVelocities: [2.4, 3.6],
-      sigmaMultipliers: [2.6, 3.0],
-      takeProfits: [0.08, 0.1],
-      maxLosses: [0.05, 0.07],
+      continuationEdge: 0.03,
+      reversalEdge: 0.04,
+      continuationScore: 0.62,
+      reversalScore: 0.58,
+      continuationAbsGap: 7,
+      reversalAbsGap: 9,
+      continuationRelativeGap: 0.56,
+      reversalRelativeGap: 0.72,
+      peakRetain: 0.8,
+      reversalRetrace: 0.12,
+      maxReversalRetrace: 0.62,
+      shortVelocity: 1.2,
+      midVelocity: 2.6,
+      continuationVotes: 3,
+      reversalVelocity: 1.3,
+      reversalVotes: 3,
+      flatTicks: 1,
+      sigmaMultiplier: 2.2,
+      maxContinuationAsk: 0.66,
+      maxReversalAsk: 0.58,
+      maxSpread: 0.03,
+      takeProfit: 0.09,
+      maxLoss: 0.06,
     },
     {
       profile: "neutral",
-      continuationEdges: [0.025, 0.04],
-      reversalEdges: [0.035, 0.055],
-      continuationScores: [0.64, 0.7],
-      reversalScores: [0.6, 0.66],
-      peakRetains: [0.84, 0.9],
-      shortVelocities: [1.4, 2.2],
-      midVelocities: [3, 5],
-      flatTicks: [0, 1],
-      reversalVelocities: [1.6, 2.4],
-      sigmaMultipliers: [2.2, 2.6],
-      takeProfits: [0.08, 0.1],
-      maxLosses: [0.06, 0.08],
+      continuationEdge: 0.018,
+      reversalEdge: 0.026,
+      continuationScore: 0.54,
+      reversalScore: 0.5,
+      continuationAbsGap: 5.5,
+      reversalAbsGap: 7,
+      continuationRelativeGap: 0.42,
+      reversalRelativeGap: 0.52,
+      peakRetain: 0.68,
+      reversalRetrace: 0.08,
+      maxReversalRetrace: 0.74,
+      shortVelocity: 0.45,
+      midVelocity: 1.1,
+      continuationVotes: 2,
+      reversalVelocity: 0.55,
+      reversalVotes: 2,
+      flatTicks: 2,
+      sigmaMultiplier: 1.65,
+      maxContinuationAsk: 0.72,
+      maxReversalAsk: 0.64,
+      maxSpread: 0.04,
+      takeProfit: 0.075,
+      maxLoss: 0.075,
     },
     {
       profile: "aggressive",
-      continuationEdges: [0.015, 0.025],
-      reversalEdges: [0.02, 0.035],
-      continuationScores: [0.58, 0.64],
-      reversalScores: [0.54, 0.6],
-      peakRetains: [0.78, 0.84],
-      shortVelocities: [0.8, 1.4],
-      midVelocities: [1.8, 3],
-      flatTicks: [1, 2],
-      reversalVelocities: [0.8, 1.6],
-      sigmaMultipliers: [1.8, 2.2],
-      takeProfits: [0.07, 0.1],
-      maxLosses: [0.08, 0.1],
+      continuationEdge: 0.006,
+      reversalEdge: 0.012,
+      continuationScore: 0.44,
+      reversalScore: 0.42,
+      continuationAbsGap: 4,
+      reversalAbsGap: 5.5,
+      continuationRelativeGap: 0.28,
+      reversalRelativeGap: 0.36,
+      peakRetain: 0.56,
+      reversalRetrace: 0.05,
+      maxReversalRetrace: 0.82,
+      shortVelocity: 0.15,
+      midVelocity: 0.35,
+      continuationVotes: 2,
+      reversalVelocity: 0.18,
+      reversalVotes: 2,
+      flatTicks: 3,
+      sigmaMultiplier: 1.25,
+      maxContinuationAsk: 0.78,
+      maxReversalAsk: 0.7,
+      maxSpread: 0.055,
+      takeProfit: 0.055,
+      maxLoss: 0.095,
     },
   ];
 
   for (const profile of profiles) {
-    for (const minContinuationNetEdge of profile.continuationEdges) {
-      for (const minReversalNetEdge of profile.reversalEdges) {
-        for (const minContinuationScore of profile.continuationScores) {
-          for (const minReversalScore of profile.reversalScores) {
-            for (const minContinuationPeakRetain of profile.peakRetains) {
-              for (const minContinuationSideVelocityShort of profile.shortVelocities) {
-                for (const minContinuationSideVelocityMid of profile.midVelocities) {
-                  for (const maxContinuationFlatTicks of profile.flatTicks) {
-                    for (const minReversalVelocityTowardZero of profile.reversalVelocities) {
-                      for (const sigmaMultiplier of profile.sigmaMultipliers) {
-                        for (const takeProfitCents of profile.takeProfits) {
-                          for (const maxLossCents of profile.maxLosses) {
-                            variants.push({
-                              profile: profile.profile,
-                              name:
-                                `${profile.profile}` +
-                                `_ce${minContinuationNetEdge}` +
-                                `_re${minReversalNetEdge}` +
-                                `_cs${minContinuationScore}` +
-                                `_rs${minReversalScore}` +
-                                `_pr${minContinuationPeakRetain}` +
-                                `_vs${minContinuationSideVelocityShort}` +
-                                `_vm${minContinuationSideVelocityMid}` +
-                                `_flat${maxContinuationFlatTicks}` +
-                                `_rv${minReversalVelocityTowardZero}` +
-                                `_sm${sigmaMultiplier}` +
-                                `_tp${takeProfitCents}` +
-                                `_sl${maxLossCents}`,
-                              config: {
-                                ...base,
-                                allowOppositeSides: true,
-                                maxOpenLegs: 2,
-                                maxSameSideLegs: 2,
-                                maxEntriesPerMarket: 2,
-                                maxSameModelEntries: 1,
-                                minContinuationNetEdge,
-                                minReversalNetEdge,
-                                minContinuationScore,
-                                minReversalScore,
-                                minContinuationPeakRetain,
-                                minContinuationSideVelocityShort,
-                                minContinuationSideVelocityMid,
-                                maxContinuationFlatTicks,
-                                minReversalVelocityTowardZero,
-                                costBuffer: 0.012,
-                                sigmaMultiplier,
-                                maxSpread: 0.03,
-                                takeProfitCents,
-                                maxLossCents,
-                                catastrophicLossCents: Math.max(
-                                  base.catastrophicLossCents,
-                                  maxLossCents * 1.8,
-                                ),
-                              },
-                            });
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+    for (const edgeScale of [0.85, 1, 1.2]) {
+      for (const momentumScale of [0.8, 1, 1.25]) {
+        for (const askScale of [0.96, 1.04]) {
+          for (const riskScale of [0.9, 1.1]) {
+            const minContinuationNetEdge = round(
+              profile.continuationEdge * edgeScale,
+              4,
+            );
+            const minReversalNetEdge = round(profile.reversalEdge * edgeScale, 4);
+            const minContinuationScore = round(
+              profile.continuationScore * (0.95 + (edgeScale - 1) * 0.2),
+              4,
+            );
+            const minReversalScore = round(
+              profile.reversalScore * (0.95 + (edgeScale - 1) * 0.2),
+              4,
+            );
+            const minContinuationSideVelocityShort = round(
+              profile.shortVelocity * momentumScale,
+              4,
+            );
+            const minContinuationSideVelocityMid = round(
+              profile.midVelocity * momentumScale,
+              4,
+            );
+            const minReversalVelocityTowardZero = round(
+              profile.reversalVelocity * momentumScale,
+              4,
+            );
+            const takeProfitCents = round(profile.takeProfit * riskScale, 4);
+            const maxLossCents = round(profile.maxLoss * riskScale, 4);
+            variants.push({
+              profile: profile.profile,
+              name:
+                `${profile.profile}` +
+                `_e${edgeScale}` +
+                `_m${momentumScale}` +
+                `_a${askScale}` +
+                `_r${riskScale}`,
+              config: {
+                ...base,
+                allowOppositeSides: true,
+                maxOpenLegs: 2,
+                maxSameSideLegs: 2,
+                maxEntriesPerMarket: 2,
+                maxSameModelEntries: 1,
+                minEntryRemaining: 28,
+                maxEntryRemaining: 255,
+                maxContinuationAsk: round(profile.maxContinuationAsk * askScale, 4),
+                maxReversalAsk: round(profile.maxReversalAsk * askScale, 4),
+                maxSpread: round(profile.maxSpread * askScale, 4),
+                minContinuationAbsGap: profile.continuationAbsGap,
+                minReversalAbsGap: profile.reversalAbsGap,
+                minContinuationRelativeGap: profile.continuationRelativeGap,
+                minReversalRelativeGap: profile.reversalRelativeGap,
+                minContinuationNetEdge,
+                minReversalNetEdge,
+                minContinuationScore,
+                minReversalScore,
+                minContinuationPeakRetain: profile.peakRetain,
+                minReversalPeakRetrace: profile.reversalRetrace,
+                maxReversalPeakRetrace: profile.maxReversalRetrace,
+                minContinuationSideVelocityShort,
+                minContinuationSideVelocityMid,
+                minContinuationMomentumVotes: profile.continuationVotes,
+                maxContinuationFlatTicks: profile.flatTicks,
+                minReversalVelocityTowardZero,
+                minReversalMomentumVotes: profile.reversalVotes,
+                maxReversalFlatTicks: profile.flatTicks,
+                costBuffer: profile.profile === "aggressive" ? 0.006 : 0.009,
+                sigmaMultiplier: profile.sigmaMultiplier,
+                takeProfitCents,
+                maxLossCents,
+                catastrophicLossCents: Math.max(0.14, maxLossCents * 1.8),
+              },
+            });
           }
         }
       }
@@ -538,6 +663,8 @@ function printResult(
       pnl: row.result.pnl,
       score: row.result.score,
       markets: row.result.markets,
+      explicit: row.result.explicitResolutionMarkets,
+      inferred: row.result.inferredResolutionMarkets,
       tradedMarkets: row.result.tradedMarkets,
       trades: row.result.trades,
       winRate: row.result.winRate,
@@ -563,16 +690,23 @@ async function main() {
     );
   }
 
-  const trainEnd = Math.floor(markets.length * 0.6);
-  const validationEnd = Math.floor(markets.length * 0.8);
-  const train = markets.slice(0, trainEnd);
-  const validation = markets.slice(trainEnd, validationEnd);
-  const test = markets.slice(validationEnd);
+  const randomizedMarkets = shuffled(markets, SPLIT_SEED);
+  const trainEnd = Math.floor(randomizedMarkets.length * 0.6);
+  const validationEnd = Math.floor(randomizedMarkets.length * 0.8);
+  const train = randomizedMarkets
+    .slice(0, trainEnd)
+    .sort((a, b) => a.slotEndMs - b.slotEndMs);
+  const validation = randomizedMarkets
+    .slice(trainEnd, validationEnd)
+    .sort((a, b) => a.slotEndMs - b.slotEndMs);
+  const test = randomizedMarkets
+    .slice(validationEnd)
+    .sort((a, b) => a.slotEndMs - b.slotEndMs);
   const base = __probabilityPortfolioTestHooks.readProbabilityPortfolioConfig();
   const variants = buildVariants(base);
 
   console.log(
-    `Loaded ${markets.length} markets from ${LOG_DIR}; split train=${train.length}, validation=${validation.length}, test=${test.length}`,
+    `Scanned ${files.length} window logs from ${LOG_DIR}; loaded ${markets.length} replayable markets; explicit=${markets.filter((market) => market.resolution?.source === "explicit").length}; inferred=${markets.filter((market) => market.resolution?.source === "inferred").length}; random split seed=${SPLIT_SEED}; train=${train.length}, validation=${validation.length}, test=${test.length}; variants=${variants.length}`,
   );
 
   const trainRows = variants
@@ -602,16 +736,32 @@ async function main() {
 
   if (validationRows.length === 0)
     throw new Error("no candidate survived validation");
+  const pickRows = (
+    start: number,
+    count: number,
+  ): typeof validationRows => {
+    const rows: typeof validationRows = [];
+    for (let i = start; i < validationRows.length && rows.length < count; i++) {
+      rows.push(validationRows[i]!);
+    }
+    return rows;
+  };
+  const middleStart = Math.max(0, Math.floor(validationRows.length / 2) - 1);
   const selectedRows = [
-    { label: "best-validation", row: validationRows[0]! },
-    {
-      label: "median-validation",
-      row: validationRows[Math.floor(validationRows.length / 2)]!,
-    },
-    {
-      label: "worst-validation",
-      row: validationRows[validationRows.length - 1]!,
-    },
+    ...pickRows(0, 2).map((row, index) => ({
+      label: `best-validation-${index + 1}`,
+      row,
+    })),
+    ...pickRows(middleStart, 2).map((row, index) => ({
+      label: `median-validation-${index + 1}`,
+      row,
+    })),
+    ...pickRows(Math.max(0, validationRows.length - 2), 2).map(
+      (row, index) => ({
+        label: `worst-validation-${index + 1}`,
+        row,
+      }),
+    ),
   ];
 
   const testRows = selectedRows.map((selected) => ({
@@ -623,9 +773,9 @@ async function main() {
     selected,
   }));
   printResult(
-    "Final holdout test for validation best / median / worst",
+    "Final holdout test for validation best 2 / median 2 / worst 2",
     testRows,
-    3,
+    6,
   );
   if (process.env.PP_BACKTEST_DUMP_TRADES === "1") {
     for (const testRow of testRows) {
@@ -665,11 +815,24 @@ async function main() {
         `PP_MAX_SAME_SIDE_LEGS=${selectedConfig.maxSameSideLegs}`,
         `PP_MAX_ENTRIES_PER_MARKET=${selectedConfig.maxEntriesPerMarket}`,
         `PP_MAX_SAME_MODEL_ENTRIES=${selectedConfig.maxSameModelEntries}`,
+        `PP_MIN_ENTRY_REMAINING=${selectedConfig.minEntryRemaining}`,
+        `PP_MAX_ENTRY_REMAINING=${selectedConfig.maxEntryRemaining}`,
+        `PP_MAX_CONTINUATION_ASK=${selectedConfig.maxContinuationAsk}`,
+        `PP_MAX_REVERSAL_ASK=${selectedConfig.maxReversalAsk}`,
+        `PP_MIN_CONTINUATION_ABS_GAP=${selectedConfig.minContinuationAbsGap}`,
+        `PP_MIN_CONTINUATION_RELATIVE_GAP=${selectedConfig.minContinuationRelativeGap}`,
         `PP_MIN_CONTINUATION_PEAK_RETAIN=${selectedConfig.minContinuationPeakRetain}`,
         `PP_MIN_CONTINUATION_SIDE_VELOCITY_SHORT=${selectedConfig.minContinuationSideVelocityShort}`,
         `PP_MIN_CONTINUATION_SIDE_VELOCITY_MID=${selectedConfig.minContinuationSideVelocityMid}`,
         `PP_MAX_CONTINUATION_FLAT_TICKS=${selectedConfig.maxContinuationFlatTicks}`,
+        `PP_MIN_CONTINUATION_MOMENTUM_VOTES=${selectedConfig.minContinuationMomentumVotes}`,
+        `PP_MIN_REVERSAL_ABS_GAP=${selectedConfig.minReversalAbsGap}`,
+        `PP_MIN_REVERSAL_RELATIVE_GAP=${selectedConfig.minReversalRelativeGap}`,
+        `PP_MIN_REVERSAL_PEAK_RETRACE=${selectedConfig.minReversalPeakRetrace}`,
+        `PP_MAX_REVERSAL_PEAK_RETRACE=${selectedConfig.maxReversalPeakRetrace}`,
         `PP_MIN_REVERSAL_VELOCITY_TOWARD_ZERO=${selectedConfig.minReversalVelocityTowardZero}`,
+        `PP_MAX_REVERSAL_FLAT_TICKS=${selectedConfig.maxReversalFlatTicks}`,
+        `PP_MIN_REVERSAL_MOMENTUM_VOTES=${selectedConfig.minReversalMomentumVotes}`,
         `PP_COST_BUFFER=${selectedConfig.costBuffer}`,
         `PP_SIGMA_MULTIPLIER=${selectedConfig.sigmaMultiplier}`,
         `PP_MAX_SPREAD=${selectedConfig.maxSpread}`,

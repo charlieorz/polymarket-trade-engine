@@ -40,6 +40,7 @@ export type PortfolioConfig = {
   minContinuationAcceleration: number;
   minContinuationEmaTrend: number;
   maxContinuationFlatTicks: number;
+  minContinuationMomentumVotes: number;
   minContinuationNetEdge: number;
   minContinuationScore: number;
   minReversalAbsGap: number;
@@ -48,6 +49,7 @@ export type PortfolioConfig = {
   maxReversalPeakRetrace: number;
   minReversalVelocityTowardZero: number;
   maxReversalFlatTicks: number;
+  minReversalMomentumVotes: number;
   minReversalNetEdge: number;
   minReversalScore: number;
   reversalScoreMargin: number;
@@ -314,6 +316,10 @@ export function readProbabilityPortfolioConfig(
       0,
       Math.floor(parseNumberEnv(env, "PP_MAX_CONTINUATION_FLAT_TICKS", 1)),
     ),
+    minContinuationMomentumVotes: Math.max(
+      1,
+      Math.floor(parseNumberEnv(env, "PP_MIN_CONTINUATION_MOMENTUM_VOTES", 2)),
+    ),
     minContinuationNetEdge: Math.max(
       0,
       parseNumberEnv(env, "PP_MIN_CONTINUATION_NET_EDGE", 0.015),
@@ -345,6 +351,10 @@ export function readProbabilityPortfolioConfig(
     maxReversalFlatTicks: Math.max(
       0,
       Math.floor(parseNumberEnv(env, "PP_MAX_REVERSAL_FLAT_TICKS", 1)),
+    ),
+    minReversalMomentumVotes: Math.max(
+      1,
+      Math.floor(parseNumberEnv(env, "PP_MIN_REVERSAL_MOMENTUM_VOTES", 2)),
     ),
     minReversalNetEdge: Math.max(
       0,
@@ -854,26 +864,23 @@ function evaluateContinuation(params: {
   ) {
     return null;
   }
-  if (
-    sideVelocityShort !== null &&
-    sideVelocityShort < config.minContinuationSideVelocityShort
-  ) {
-    return null;
-  }
-  if (
-    sideVelocityMid !== null &&
-    sideVelocityMid < config.minContinuationSideVelocityMid
-  ) {
-    return null;
-  }
-  if (
-    sideAcceleration !== null &&
-    sideAcceleration < config.minContinuationAcceleration
-  ) {
-    return null;
-  }
-  if (sideEmaTrend !== null && sideEmaTrend < config.minContinuationEmaTrend)
-    return null;
+  const momentumVotes =
+    (sideVelocityShort === null ||
+    sideVelocityShort >= config.minContinuationSideVelocityShort
+      ? 1
+      : 0) +
+    (sideVelocityMid === null ||
+    sideVelocityMid >= config.minContinuationSideVelocityMid
+      ? 1
+      : 0) +
+    (sideAcceleration === null ||
+    sideAcceleration >= config.minContinuationAcceleration
+      ? 1
+      : 0) +
+    (sideEmaTrend === null || sideEmaTrend >= config.minContinuationEmaTrend
+      ? 1
+      : 0);
+  if (momentumVotes < config.minContinuationMomentumVotes) return null;
   if (edge < config.minContinuationNetEdge) return null;
 
   const after = portfolioAfterBuy({
@@ -1004,14 +1011,16 @@ function evaluateReversal(params: {
   ) {
     return null;
   }
-  if (
-    velocityTowardZero !== null &&
-    velocityTowardZero < config.minReversalVelocityTowardZero
-  ) {
-    return null;
-  }
-  if (!movingTowardZero || !accelerationAgainstAdv) return null;
-  if (!emaAgainstAdv && (bidSlope3s === null || bidSlope3s <= 0)) return null;
+  const reversalVotes =
+    (velocityTowardZero !== null &&
+    velocityTowardZero >= config.minReversalVelocityTowardZero
+      ? 1
+      : 0) +
+    (movingTowardZero ? 1 : 0) +
+    (accelerationAgainstAdv ? 1 : 0) +
+    (emaAgainstAdv ? 1 : 0) +
+    (bidSlope3s === null || bidSlope3s > 0 ? 1 : 0);
+  if (reversalVotes < config.minReversalMomentumVotes) return null;
   if (askSlope3s !== null && askSlope3s > 0.06) return null;
   if (edge < config.minReversalNetEdge) return null;
 
