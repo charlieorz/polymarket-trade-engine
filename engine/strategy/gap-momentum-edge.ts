@@ -16,7 +16,7 @@ type Config = {
   maxEntryElapsedSeconds: number;
   finalWindowSeconds: number;
   holdOnlySeconds: number;
-  orderUsd: number;
+  shares: number;
   maxEntriesPerMarket: number;
   entryOrderType: OrderType;
   entryOrderTtlMs: number;
@@ -148,21 +148,21 @@ export function readGapMomentumEdgeConfig(
     atrPeriod: Math.max(2, parseNumberEnv(env, "GME_ATR_PERIOD", 14)),
     velocityEmaPeriod: Math.max(2, parseNumberEnv(env, "GME_VELOCITY_EMA_PERIOD", 6)),
     trendLookback: Math.max(3, Math.floor(parseNumberEnv(env, "GME_TREND_LOOKBACK", 10))),
-    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "GME_NO_ENTRY_FIRST_SECONDS", 20)),
+    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "GME_NO_ENTRY_FIRST_SECONDS", 60)),
     maxEntryElapsedSeconds: Math.max(
       0,
       parseNumberEnv(env, "GME_MAX_ENTRY_ELAPSED_SECONDS", 250),
     ),
     finalWindowSeconds: Math.max(1, parseNumberEnv(env, "GME_FINAL_WINDOW_SECONDS", 40)),
     holdOnlySeconds: Math.max(0, parseNumberEnv(env, "GME_HOLD_ONLY_SECONDS", 5)),
-    orderUsd: Math.max(1, parseNumberEnv(env, "GME_ORDER_USD", 5)),
+    shares: Math.max(0.01, parseNumberEnv(env, "GME_SHARES", 6)),
     maxEntriesPerMarket: Math.max(
       1,
       Math.floor(parseNumberEnv(env, "GME_MAX_ENTRIES_PER_MARKET", 1)),
     ),
     entryOrderType: parseOrderTypeEnv(env, "GME_ENTRY_ORDER_TYPE", "GTC"),
     entryOrderTtlMs: Math.max(250, parseNumberEnv(env, "GME_ENTRY_ORDER_TTL_MS", 2500)),
-    takeProfitOrderType: parseOrderTypeEnv(env, "GME_TAKE_PROFIT_ORDER_TYPE", "GTC"),
+    takeProfitOrderType: parseOrderTypeEnv(env, "GME_TAKE_PROFIT_ORDER_TYPE", "FOK"),
     takeProfitOrderTtlMs: Math.max(
       250,
       parseNumberEnv(env, "GME_TAKE_PROFIT_ORDER_TTL_MS", 5000),
@@ -170,7 +170,7 @@ export function readGapMomentumEdgeConfig(
     finalDirectTakeProfitOrderType: parseOrderTypeEnv(
       env,
       "GME_FINAL_DIRECT_TP_ORDER_TYPE",
-      "GTC",
+      "FOK",
     ),
     finalExitOrderType: parseOrderTypeEnv(env, "GME_FINAL_EXIT_ORDER_TYPE", "FOK"),
     finalExitOrderTtlMs: Math.max(
@@ -389,10 +389,6 @@ function passiveSellPrice(params: {
   return price;
 }
 
-function sharesForBudget(orderUsd: number, price: number): number {
-  return Math.floor((orderUsd / price) * 100) / 100;
-}
-
 function chooseEntry(params: {
   ctx: StrategyContext;
   gap: number;
@@ -443,7 +439,7 @@ function chooseEntry(params: {
       : roundPrice(Math.min(quality.ask, config.maxEntryPrice));
   if (price === null) return null;
 
-  const shares = sharesForBudget(config.orderUsd, price);
+  const shares = config.shares;
   if (shares <= 0) return null;
 
   const fair = computeFairProbability({

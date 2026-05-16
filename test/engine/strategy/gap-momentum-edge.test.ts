@@ -46,7 +46,7 @@ const basePosition = {
   entryPrice: 0.57,
   entryMs: 1_000,
   entryGap: 16,
-  shares: 8.77,
+  shares: 6,
   takeProfitPrice: 0.75,
   peakSideGap: 18,
   takeProfitOrderPlaced: false,
@@ -56,12 +56,13 @@ const basePosition = {
 describe("gap-momentum-edge", () => {
   test("parses conservative defaults", () => {
     const config = __gapMomentumEdgeTestHooks.readGapMomentumEdgeConfig({});
-    expect(config.orderUsd).toBe(5);
+    expect(config.shares).toBe(6);
     expect(config.maxEntriesPerMarket).toBe(1);
     expect(config.entryOrderType).toBe("GTC");
-    expect(config.finalDirectTakeProfitOrderType).toBe("GTC");
+    expect(config.takeProfitOrderType).toBe("FOK");
+    expect(config.finalDirectTakeProfitOrderType).toBe("FOK");
     expect(config.finalExitOrderType).toBe("FOK");
-    expect(config.noEntryFirstSeconds).toBe(20);
+    expect(config.noEntryFirstSeconds).toBe(60);
     expect(config.maxEntryElapsedSeconds).toBe(250);
   });
 
@@ -118,7 +119,7 @@ describe("gap-momentum-edge", () => {
 
     expect(entry?.side).toBe("UP");
     expect(entry?.price).toBe(0.57);
-    expect(entry?.shares).toBeCloseTo(8.77, 2);
+    expect(entry?.shares).toBe(6);
   });
 
   test("blocks entry after elapsed 250 seconds", () => {
@@ -143,6 +144,44 @@ describe("gap-momentum-edge", () => {
     expect(entry).toBeNull();
   });
 
+  test("blocks entry before elapsed 60 seconds", () => {
+    const entry = __gapMomentumEdgeTestHooks.chooseEntry({
+      ctx: mockCtx(),
+      gap: 16,
+      remaining: 245,
+      elapsed: 59,
+      stats: readyStats(),
+      state: {
+        entries: 0,
+        pendingEntry: false,
+        position: null,
+        closing: false,
+        released: false,
+        settlementHoldLogged: false,
+      },
+      config: __gapMomentumEdgeTestHooks.readGapMomentumEdgeConfig({
+        GME_MIN_NET_EDGE: "0.01",
+      }),
+    });
+    expect(entry).toBeNull();
+  });
+
+  test("uses FOK for planned take-profit at the current bid", () => {
+    const exit = __gapMomentumEdgeTestHooks.chooseExit({
+      ctx: mockCtx({ upBid: 0.76, upAsk: 0.78 }),
+      pos: { ...basePosition, takeProfitPrice: 0.75 },
+      gap: 20,
+      ask: 0.78,
+      bid: 0.76,
+      bidLiquidity: 20,
+      remaining: 120,
+      stats: readyStats(),
+    });
+    expect(exit?.orderType).toBe("FOK");
+    expect(exit?.reason).toBe("planned take-profit");
+    expect(exit?.price).toBe(0.76);
+  });
+
   test("holds inside the final five seconds even with a high bid", () => {
     const exit = __gapMomentumEdgeTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.92, upAsk: 0.93 }),
@@ -157,7 +196,7 @@ describe("gap-momentum-edge", () => {
     expect(exit).toBeNull();
   });
 
-  test("uses GTC for final direct take-profit and posts passively above bid", () => {
+  test("uses FOK for final direct take-profit at the current bid", () => {
     const exit = __gapMomentumEdgeTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.92, upAsk: 0.94 }),
       pos: { ...basePosition },
@@ -168,9 +207,9 @@ describe("gap-momentum-edge", () => {
       remaining: 30,
       stats: readyStats(),
     });
-    expect(exit?.orderType).toBe("GTC");
+    expect(exit?.orderType).toBe("FOK");
     expect(exit?.reason).toBe("final direct take-profit");
-    expect(exit?.price).toBeGreaterThan(0.92);
+    expect(exit?.price).toBe(0.92);
   });
 
   test("does not perform a losing final FOK exit", () => {
