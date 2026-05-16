@@ -532,7 +532,7 @@ export function buildTradeWindowSvgFromLog(
   // 这里给“交易”列预留更宽空间，主要是兼容 SELL DOWN 这类最长标题。
   const tableColumns = {
     tradeX: table.x + 8,
-    delayX: table.x + 410,
+    delayX: table.x + 8,
     signalX: table.x + 500,
     confirmX: table.x + 1008,
     signalW: 454,
@@ -614,7 +614,7 @@ export function buildTradeWindowSvgFromLog(
     const orderType = o.orderType ? `${o.orderType} ` : "";
     const title = truncate(
       `${o.status.toUpperCase()} ${orderType}${o.action.toUpperCase()} ${o.side} @ ${fmt(o.price)} ${o.shares ? `x ${fmt(o.shares)}` : ""}${reason ? ` ${reason}` : ""}`,
-      48,
+      34,
     );
     const orderMetrics = {
       status: o.status,
@@ -624,8 +624,8 @@ export function buildTradeWindowSvgFromLog(
     return `
       <g>
         <line x1="${table.x}" y1="${y - 26}" x2="${table.x + table.w}" y2="${y - 26}" stroke="#1f2b35"/>
-        <text x="${tableColumns.tradeX}" y="${y}" fill="${sideColor(o.side)}" font-size="21" font-weight="800">${esc(title)}</text>
-        <text x="${tableColumns.delayX}" y="${y}" fill="#cbd5e1" font-size="19">${esc(delay)}</text>
+        <text x="${tableColumns.tradeX}" y="${y - 3}" fill="${sideColor(o.side)}" font-size="18" font-weight="800">${esc(title)}</text>
+        <text x="${tableColumns.delayX}" y="${y + 24}" fill="#cbd5e1" font-size="16">${esc(delay)}</text>
         ${renderMetricChips({
           metrics: signal?.metrics,
           x: tableColumns.signalX,
@@ -661,8 +661,7 @@ export function buildTradeWindowSvgFromLog(
     ${orderMarks}
     ${xTicks.join("")}
     <text x="${table.x + 8}" y="${table.y}" fill="#f8fafc" font-size="25" font-weight="800">交易指标快照</text>
-    <text x="${tableColumns.tradeX}" y="${table.y + 34}" fill="#64748b" font-size="16">交易</text>
-    <text x="${tableColumns.delayX}" y="${table.y + 34}" fill="#64748b" font-size="16">延迟</text>
+    <text x="${tableColumns.tradeX}" y="${table.y + 34}" fill="#64748b" font-size="16">交易 / 延迟</text>
     <text x="${tableColumns.signalX}" y="${table.y + 34}" fill="#64748b" font-size="16">策略识别指标</text>
     <text x="${tableColumns.confirmX}" y="${table.y + 34}" fill="#64748b" font-size="16">订单确认指标</text>
     ${rows.join("")}

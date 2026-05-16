@@ -15,6 +15,8 @@ type Config = {
   noEntryFirstSeconds: number;
   maxEntryElapsedSeconds: number;
   finalWindowSeconds: number;
+  finalActionStartElapsedSeconds: number;
+  finalActionEndElapsedSeconds: number;
   holdOnlySeconds: number;
   shares: number;
   maxEntriesPerMarket: number;
@@ -44,12 +46,8 @@ type Config = {
   sigmaMultiplier: number;
   takeProfitMultiplier: number;
   takeProfitMaxPrice: number;
-  finalDirectTakeProfitBid: number;
-  finalMinFairProbability: number;
-  finalMinGapAtr: number;
-  finalMinPeakRetainRatio: number;
-  finalSellEdgeBuffer: number;
-  finalHoldEdgeBuffer: number;
+  finalTakeProfitRatio: number;
+  finalStopLossRatio: number;
 };
 
 type EdgeStats = {
@@ -152,12 +150,20 @@ export function readGapMomentumEdgeConfig(
     atrPeriod: Math.max(2, parseNumberEnv(env, "GME_ATR_PERIOD", 14)),
     velocityEmaPeriod: Math.max(2, parseNumberEnv(env, "GME_VELOCITY_EMA_PERIOD", 6)),
     trendLookback: Math.max(3, Math.floor(parseNumberEnv(env, "GME_TREND_LOOKBACK", 10))),
-    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "GME_NO_ENTRY_FIRST_SECONDS", 120)),
+    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "GME_NO_ENTRY_FIRST_SECONDS", 60)),
     maxEntryElapsedSeconds: Math.max(
       0,
       parseNumberEnv(env, "GME_MAX_ENTRY_ELAPSED_SECONDS", 250),
     ),
     finalWindowSeconds: Math.max(1, parseNumberEnv(env, "GME_FINAL_WINDOW_SECONDS", 40)),
+    finalActionStartElapsedSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "GME_FINAL_ACTION_START_SECONDS", 260),
+    ),
+    finalActionEndElapsedSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "GME_FINAL_ACTION_END_SECONDS", 295),
+    ),
     holdOnlySeconds: Math.max(0, parseNumberEnv(env, "GME_HOLD_ONLY_SECONDS", 5)),
     shares: Math.max(0.01, parseNumberEnv(env, "GME_SHARES", 6)),
     maxEntriesPerMarket: Math.max(
@@ -183,7 +189,7 @@ export function readGapMomentumEdgeConfig(
     ),
     maxEntryPrice: clamp(parseNumberEnv(env, "GME_MAX_ENTRY_PRICE", 0.6), 0.01, 0.99),
     maxSpread: Math.max(0, parseNumberEnv(env, "GME_MAX_SPREAD", 0.04)),
-    minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "GME_MIN_ENTRY_LIQUIDITY_USD", 8)),
+    minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "GME_MIN_ENTRY_LIQUIDITY_USD", 6)),
     minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "GME_MIN_EXIT_LIQUIDITY_USD", 5)),
     minAbsGap: Math.max(0, parseNumberEnv(env, "GME_MIN_ABS_GAP", 3.5)),
     minGapAtr: Math.max(0, parseNumberEnv(env, "GME_MIN_GAP_ATR", 0.85)),
@@ -192,41 +198,37 @@ export function readGapMomentumEdgeConfig(
       0,
       parseNumberEnv(env, "GME_EARLY_REMAINING_SECONDS", 120),
     ),
-    lateMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_LATE_MIN_GAP_ATR", 0.65)),
+    lateMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_LATE_MIN_GAP_ATR", 0.6)),
     lateRemainingSeconds: Math.max(
       0,
       parseNumberEnv(env, "GME_LATE_REMAINING_SECONDS", 60),
     ),
-    minPeakRetainRatio: clamp(parseNumberEnv(env, "GME_MIN_PEAK_RETAIN_RATIO", 0.48), 0, 1),
+    minPeakRetainRatio: clamp(parseNumberEnv(env, "GME_MIN_PEAK_RETAIN_RATIO", 0.5), 0, 1),
     minTrendConsistency: clamp(parseNumberEnv(env, "GME_MIN_TREND_CONSISTENCY", 0.38), 0, 1),
     minSideVelocityEma: parseNumberEnv(env, "GME_MIN_SIDE_VELOCITY_EMA", -0.18),
-    minCumulativeGap: Math.max(0, parseNumberEnv(env, "GME_MIN_CUMULATIVE_GAP", 500)),
-    minNetEdge: Math.max(0, parseNumberEnv(env, "GME_MIN_NET_EDGE", 0.004)),
+    minCumulativeGap: Math.max(0, parseNumberEnv(env, "GME_MIN_CUMULATIVE_GAP", 20)),
+    minNetEdge: Math.max(0, parseNumberEnv(env, "GME_MIN_NET_EDGE", 0.008)),
     costBuffer: Math.max(0, parseNumberEnv(env, "GME_COST_BUFFER", 0.005)),
     sigmaMultiplier: Math.max(0.1, parseNumberEnv(env, "GME_SIGMA_MULTIPLIER", 1.25)),
     takeProfitMultiplier: Math.max(
       1,
-      parseNumberEnv(env, "GME_TAKE_PROFIT_MULTIPLIER", 1.3),
+      parseNumberEnv(env, "GME_TAKE_PROFIT_MULTIPLIER", 1.4),
     ),
     takeProfitMaxPrice: clamp(parseNumberEnv(env, "GME_TAKE_PROFIT_MAX_PRICE", 0.9), 0.01, 0.99),
-    finalDirectTakeProfitBid: clamp(
-      parseNumberEnv(env, "GME_FINAL_DIRECT_TP_BID", 0.9),
+    finalTakeProfitRatio: clamp(
+      parseNumberEnv(
+        env,
+        "GME_FINAL_TAKE_PROFIT_RATIO",
+        parseNumberEnv(env, "GME_FINAL_DIRECT_TP_BID", 0.9),
+      ),
       0.01,
       0.99,
     ),
-    finalMinFairProbability: clamp(
-      parseNumberEnv(env, "GME_FINAL_MIN_FAIR_PROBABILITY", 0.88),
-      0,
-      1,
+    finalStopLossRatio: clamp(
+      parseNumberEnv(env, "GME_FINAL_STOP_LOSS_RATIO", 0.7),
+      0.01,
+      0.99,
     ),
-    finalMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_FINAL_MIN_GAP_ATR", 1.5)),
-    finalMinPeakRetainRatio: clamp(
-      parseNumberEnv(env, "GME_FINAL_MIN_PEAK_RETAIN_RATIO", 0.7),
-      0,
-      1,
-    ),
-    finalSellEdgeBuffer: Math.max(0, parseNumberEnv(env, "GME_FINAL_SELL_EDGE_BUFFER", 0.02)),
-    finalHoldEdgeBuffer: Math.max(0, parseNumberEnv(env, "GME_FINAL_HOLD_EDGE_BUFFER", 0.03)),
   };
 }
 
@@ -512,21 +514,20 @@ function chooseExit(params: {
   if (params.remaining <= config.holdOnlySeconds) return null;
 
   const sideCurrentGap = sideGap(params.pos.side, params.gap);
-  const gapAtr =
-    params.stats.atr === null ? 0 : Math.abs(params.gap) / Math.max(params.stats.atr, EPSILON);
-  const peakRetainRatio =
-    params.pos.peakSideGap > 0 ? sideCurrentGap / params.pos.peakSideGap : 0;
   const fair = computeFairProbability({
     sideGap: sideCurrentGap,
     remaining: params.remaining,
     atr: params.stats.atr,
     config,
   });
-  const sellEV = params.bid - params.pos.entryPrice;
-  const holdEV = fair.pFair - params.pos.entryPrice;
 
-  if (params.remaining <= config.finalWindowSeconds) {
-    if (params.bid >= config.finalDirectTakeProfitBid) {
+  if (params.elapsed >= config.finalActionEndElapsedSeconds) return null;
+
+  if (
+    params.elapsed >= config.finalActionStartElapsedSeconds &&
+    params.elapsed < config.finalActionEndElapsedSeconds
+  ) {
+    if (params.bid >= config.finalTakeProfitRatio) {
       const price =
         config.finalDirectTakeProfitOrderType === "GTC"
           ? passiveSellPrice({
@@ -541,35 +542,20 @@ function chooseExit(params: {
         price,
         orderType: config.finalDirectTakeProfitOrderType,
         ttlMs: Math.min(config.finalExitOrderTtlMs, Math.max(250, (params.remaining - 5) * 1000)),
-        reason: "final direct take-profit",
+        reason: "final threshold take-profit",
       };
     }
 
-    const strongHold =
-      fair.pFair >= config.finalMinFairProbability &&
-      gapAtr >= config.finalMinGapAtr &&
-      peakRetainRatio >= config.finalMinPeakRetainRatio;
-    if (strongHold) return null;
-
-    if (sellEV > 0 && sellEV > holdEV + config.finalSellEdgeBuffer) {
+    const oppositeFair = 1 - fair.pFair;
+    if (sideCurrentGap < 0 && oppositeFair >= config.finalStopLossRatio) {
       return {
         price: roundPrice(params.bid),
         orderType: config.finalExitOrderType,
         ttlMs: config.finalExitOrderTtlMs,
-        reason: "final profitable ev exit",
+        reason: "final stop-loss",
       };
     }
 
-    if (holdEV > sellEV + config.finalHoldEdgeBuffer) return null;
-
-    if (sellEV > 0) {
-      return {
-        price: roundPrice(params.bid),
-        orderType: config.finalExitOrderType,
-        ttlMs: config.finalExitOrderTtlMs,
-        reason: "final profitable fallback exit",
-      };
-    }
     return null;
   }
 
@@ -890,7 +876,7 @@ export const gapMomentumEdge: Strategy = async (ctx) => {
     });
     if (!exit) return;
     if (exit.reason === "planned take-profit") pos.takeProfitOrderPlaced = true;
-    if (exit.reason === "final direct take-profit") pos.finalDirectTakeProfitPlaced = true;
+    if (exit.reason === "final threshold take-profit") pos.finalDirectTakeProfitPlaced = true;
     placeSell({
       ctx,
       state,

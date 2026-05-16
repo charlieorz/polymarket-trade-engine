@@ -63,9 +63,14 @@ describe("gap-momentum-edge", () => {
     expect(config.takeProfitOrderType).toBe("FOK");
     expect(config.finalDirectTakeProfitOrderType).toBe("FOK");
     expect(config.finalExitOrderType).toBe("FOK");
-    expect(config.noEntryFirstSeconds).toBe(120);
+    expect(config.noEntryFirstSeconds).toBe(60);
     expect(config.maxEntryElapsedSeconds).toBe(250);
-    expect(config.minCumulativeGap).toBe(500);
+    expect(config.minCumulativeGap).toBe(20);
+    expect(config.takeProfitMultiplier).toBe(1.4);
+    expect(config.finalActionStartElapsedSeconds).toBe(260);
+    expect(config.finalActionEndElapsedSeconds).toBe(295);
+    expect(config.finalTakeProfitRatio).toBe(0.9);
+    expect(config.finalStopLossRatio).toBe(0.7);
   });
 
   test("computes fair probability from volatility and time", () => {
@@ -146,12 +151,12 @@ describe("gap-momentum-edge", () => {
     expect(entry).toBeNull();
   });
 
-  test("blocks entry before elapsed 120 seconds", () => {
+  test("blocks entry before elapsed 60 seconds", () => {
     const entry = __gapMomentumEdgeTestHooks.chooseEntry({
       ctx: mockCtx(),
       gap: 16,
       remaining: 245,
-      elapsed: 119,
+      elapsed: 59,
       stats: readyStats(),
       state: {
         entries: 0,
@@ -225,7 +230,7 @@ describe("gap-momentum-edge", () => {
     expect(exit).toBeNull();
   });
 
-  test("uses FOK for final direct take-profit at the current bid", () => {
+  test("uses FOK for final threshold take-profit at the current bid", () => {
     const exit = __gapMomentumEdgeTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.92, upAsk: 0.94 }),
       pos: { ...basePosition },
@@ -238,11 +243,32 @@ describe("gap-momentum-edge", () => {
       stats: readyStats(),
     });
     expect(exit?.orderType).toBe("FOK");
-    expect(exit?.reason).toBe("final direct take-profit");
+    expect(exit?.reason).toBe("final threshold take-profit");
     expect(exit?.price).toBe(0.92);
   });
 
-  test("does not perform a losing final FOK exit", () => {
+  test("uses FOK for final stop-loss when opposite probability is high", () => {
+    const exit = __gapMomentumEdgeTestHooks.chooseExit({
+      ctx: mockCtx({ upBid: 0.4, upAsk: 0.42 }),
+      pos: { ...basePosition },
+      gap: -20,
+      ask: 0.42,
+      bid: 0.4,
+      bidLiquidity: 20,
+      remaining: 20,
+      elapsed: 280,
+      stats: {
+        ...readyStats(),
+        atr: 2,
+        peakSideGap: { UP: 18, DOWN: 20 },
+      },
+    });
+    expect(exit?.orderType).toBe("FOK");
+    expect(exit?.reason).toBe("final stop-loss");
+    expect(exit?.price).toBe(0.4);
+  });
+
+  test("does not perform a final stop-loss before elapsed 260 seconds", () => {
     const exit = __gapMomentumEdgeTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.4, upAsk: 0.42 }),
       pos: { ...basePosition },
@@ -250,8 +276,8 @@ describe("gap-momentum-edge", () => {
       ask: 0.42,
       bid: 0.4,
       bidLiquidity: 20,
-      remaining: 20,
-      elapsed: 280,
+      remaining: 42,
+      elapsed: 258,
       stats: {
         ...readyStats(),
         atr: 2,

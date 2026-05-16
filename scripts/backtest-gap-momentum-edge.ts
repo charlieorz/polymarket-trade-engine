@@ -463,7 +463,7 @@ function simulateMarket(
     if (exit.reason === "planned take-profit") {
       state.position.takeProfitOrderPlaced = true;
     }
-    if (exit.reason === "final direct take-profit") {
+    if (exit.reason === "final threshold take-profit") {
       state.position.finalDirectTakeProfitPlaced = true;
     }
     if (exit.orderType === "FOK") {
@@ -596,287 +596,114 @@ function configFromEnv(env: Record<string, string>): GmeConfig {
 }
 
 function buildVariants(): Variant[] {
-  const specs: Array<{ name: string; profile: Profile; env: Record<string, string> }> = [
+  const baseEnv: Record<string, string> = {
+    GME_SHARES: "6",
+    GME_NO_ENTRY_FIRST_SECONDS: "60",
+    GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
+    GME_FINAL_WINDOW_SECONDS: "40",
+    GME_FINAL_ACTION_START_SECONDS: "260",
+    GME_FINAL_ACTION_END_SECONDS: "295",
+    GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
+    GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
+    GME_FINAL_EXIT_ORDER_TYPE: "FOK",
+  };
+  const entryProfiles: Array<{
+    name: string;
+    profile: Profile;
+    env: Record<string, string>;
+  }> = [
     {
-      name: "aggressive_a1",
-      profile: "aggressive",
+      name: "conservative",
+      profile: "conservative",
       env: {
         GME_MIN_NET_EDGE: "0.012",
-        GME_MIN_ABS_GAP: "5",
-        GME_MIN_GAP_ATR: "1.15",
-        GME_EARLY_MIN_GAP_ATR: "1.15",
-        GME_LATE_MIN_GAP_ATR: "0.85",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.58",
-        GME_MIN_TREND_CONSISTENCY: "0.46",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.08",
-        GME_MIN_CUMULATIVE_GAP: "0",
+        GME_MIN_ABS_GAP: "4.5",
+        GME_MIN_GAP_ATR: "1.05",
+        GME_EARLY_MIN_GAP_ATR: "1.05",
+        GME_LATE_MIN_GAP_ATR: "0.75",
+        GME_MIN_PEAK_RETAIN_RATIO: "0.56",
+        GME_MIN_TREND_CONSISTENCY: "0.44",
+        GME_MIN_SIDE_VELOCITY_EMA: "-0.1",
+        GME_MIN_CUMULATIVE_GAP: "50",
+        GME_MIN_ENTRY_LIQUIDITY_USD: "8",
         GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
       },
     },
     {
-      name: "aggressive_a2",
-      profile: "aggressive",
+      name: "neutral",
+      profile: "neutral",
       env: {
         GME_MIN_NET_EDGE: "0.008",
-        GME_MIN_ABS_GAP: "4",
-        GME_MIN_GAP_ATR: "1",
-        GME_EARLY_MIN_GAP_ATR: "1",
-        GME_LATE_MIN_GAP_ATR: "0.75",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.55",
-        GME_MIN_TREND_CONSISTENCY: "0.44",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.12",
-        GME_MIN_CUMULATIVE_GAP: "0",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "aggressive_a3",
-      profile: "aggressive",
-      env: {
-        GME_MIN_NET_EDGE: "0.004",
-        GME_MIN_ABS_GAP: "3.5",
-        GME_MIN_GAP_ATR: "0.9",
-        GME_EARLY_MIN_GAP_ATR: "0.9",
-        GME_LATE_MIN_GAP_ATR: "0.7",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.52",
-        GME_MIN_TREND_CONSISTENCY: "0.42",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.16",
-        GME_MIN_CUMULATIVE_GAP: "0",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "aggressive_a4_cum100",
-      profile: "aggressive",
-      env: {
-        GME_MIN_NET_EDGE: "0.006",
-        GME_MIN_ABS_GAP: "4",
-        GME_MIN_GAP_ATR: "0.95",
-        GME_EARLY_MIN_GAP_ATR: "0.95",
-        GME_LATE_MIN_GAP_ATR: "0.7",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.52",
-        GME_MIN_TREND_CONSISTENCY: "0.42",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.14",
-        GME_MIN_CUMULATIVE_GAP: "100",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "aggressive_a5_cum250",
-      profile: "aggressive",
-      env: {
-        GME_MIN_NET_EDGE: "0.006",
-        GME_MIN_ABS_GAP: "4",
-        GME_MIN_GAP_ATR: "0.95",
-        GME_EARLY_MIN_GAP_ATR: "0.95",
-        GME_LATE_MIN_GAP_ATR: "0.7",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.5",
-        GME_MIN_TREND_CONSISTENCY: "0.4",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.16",
-        GME_MIN_CUMULATIVE_GAP: "250",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "aggressive_a6_cum500",
-      profile: "aggressive",
-      env: {
-        GME_MIN_NET_EDGE: "0.004",
         GME_MIN_ABS_GAP: "3.5",
         GME_MIN_GAP_ATR: "0.85",
         GME_EARLY_MIN_GAP_ATR: "0.85",
-        GME_LATE_MIN_GAP_ATR: "0.65",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.48",
-        GME_MIN_TREND_CONSISTENCY: "0.38",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.18",
-        GME_MIN_CUMULATIVE_GAP: "500",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "aggressive_a7_price62",
-      profile: "aggressive",
-      env: {
-        GME_MIN_NET_EDGE: "0.004",
-        GME_MIN_ABS_GAP: "3",
-        GME_MIN_GAP_ATR: "0.8",
-        GME_EARLY_MIN_GAP_ATR: "0.8",
         GME_LATE_MIN_GAP_ATR: "0.6",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.48",
+        GME_MIN_PEAK_RETAIN_RATIO: "0.5",
         GME_MIN_TREND_CONSISTENCY: "0.38",
         GME_MIN_SIDE_VELOCITY_EMA: "-0.18",
-        GME_MIN_CUMULATIVE_GAP: "0",
-        GME_MAX_ENTRY_PRICE: "0.62",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
+        GME_MIN_CUMULATIVE_GAP: "20",
+        GME_MIN_ENTRY_LIQUIDITY_USD: "6",
+        GME_MAX_ENTRY_PRICE: "0.6",
       },
     },
     {
-      name: "aggressive_a8_tp125",
+      name: "aggressive",
       profile: "aggressive",
       env: {
         GME_MIN_NET_EDGE: "0.004",
-        GME_MIN_ABS_GAP: "3.5",
-        GME_MIN_GAP_ATR: "0.85",
-        GME_EARLY_MIN_GAP_ATR: "0.85",
-        GME_LATE_MIN_GAP_ATR: "0.65",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.5",
-        GME_MIN_TREND_CONSISTENCY: "0.4",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.18",
+        GME_MIN_ABS_GAP: "2.75",
+        GME_MIN_GAP_ATR: "0.65",
+        GME_EARLY_MIN_GAP_ATR: "0.65",
+        GME_LATE_MIN_GAP_ATR: "0.45",
+        GME_MIN_PEAK_RETAIN_RATIO: "0.42",
+        GME_MIN_TREND_CONSISTENCY: "0.32",
+        GME_MIN_SIDE_VELOCITY_EMA: "-0.26",
         GME_MIN_CUMULATIVE_GAP: "0",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_TAKE_PROFIT_MULTIPLIER: "1.25",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
+        GME_MIN_ENTRY_LIQUIDITY_USD: "5",
+        GME_MAX_ENTRY_PRICE: "0.62",
       },
     },
     {
-      name: "aggressive_a9_tp120",
-      profile: "aggressive",
-      env: {
-        GME_MIN_NET_EDGE: "0.002",
-        GME_MIN_ABS_GAP: "3",
-        GME_MIN_GAP_ATR: "0.75",
-        GME_EARLY_MIN_GAP_ATR: "0.75",
-        GME_LATE_MIN_GAP_ATR: "0.55",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.45",
-        GME_MIN_TREND_CONSISTENCY: "0.36",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.2",
-        GME_MIN_CUMULATIVE_GAP: "0",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_TAKE_PROFIT_MULTIPLIER: "1.2",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "aggressive_a10_loose",
+      name: "loose",
       profile: "aggressive",
       env: {
         GME_MIN_NET_EDGE: "0",
-        GME_MIN_ABS_GAP: "2.5",
-        GME_MIN_GAP_ATR: "0.65",
-        GME_EARLY_MIN_GAP_ATR: "0.65",
-        GME_LATE_MIN_GAP_ATR: "0.5",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.42",
-        GME_MIN_TREND_CONSISTENCY: "0.34",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.24",
+        GME_MIN_ABS_GAP: "2",
+        GME_MIN_GAP_ATR: "0.5",
+        GME_EARLY_MIN_GAP_ATR: "0.5",
+        GME_LATE_MIN_GAP_ATR: "0.35",
+        GME_MIN_PEAK_RETAIN_RATIO: "0.35",
+        GME_MIN_TREND_CONSISTENCY: "0.25",
+        GME_MIN_SIDE_VELOCITY_EMA: "-0.35",
         GME_MIN_CUMULATIVE_GAP: "0",
-        GME_MAX_ENTRY_PRICE: "0.62",
-        GME_TAKE_PROFIT_MULTIPLIER: "1.2",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "neutral_n1_guarded",
-      profile: "neutral",
-      env: {
-        GME_MIN_NET_EDGE: "0.01",
-        GME_MIN_ABS_GAP: "5",
-        GME_MIN_GAP_ATR: "1.1",
-        GME_EARLY_MIN_GAP_ATR: "1.1",
-        GME_LATE_MIN_GAP_ATR: "0.8",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.6",
-        GME_MIN_TREND_CONSISTENCY: "0.48",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.06",
-        GME_MIN_CUMULATIVE_GAP: "150",
-        GME_MAX_ENTRY_PRICE: "0.6",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
-      },
-    },
-    {
-      name: "conservative_c1_guarded",
-      profile: "conservative",
-      env: {
-        GME_MIN_NET_EDGE: "0.018",
-        GME_MIN_ABS_GAP: "6",
-        GME_MIN_GAP_ATR: "1.35",
-        GME_EARLY_MIN_GAP_ATR: "1.35",
-        GME_LATE_MIN_GAP_ATR: "0.95",
-        GME_MIN_PEAK_RETAIN_RATIO: "0.65",
-        GME_MIN_TREND_CONSISTENCY: "0.52",
-        GME_MIN_SIDE_VELOCITY_EMA: "-0.02",
-        GME_MIN_CUMULATIVE_GAP: "250",
-        GME_MAX_ENTRY_PRICE: "0.59",
-        GME_SHARES: "6",
-        GME_NO_ENTRY_FIRST_SECONDS: "120",
-        GME_MAX_ENTRY_ELAPSED_SECONDS: "250",
-        GME_FINAL_WINDOW_SECONDS: "40",
-        GME_TAKE_PROFIT_ORDER_TYPE: "FOK",
-        GME_FINAL_DIRECT_TP_ORDER_TYPE: "FOK",
-        GME_FINAL_EXIT_ORDER_TYPE: "FOK",
+        GME_MIN_ENTRY_LIQUIDITY_USD: "5",
+        GME_MAX_ENTRY_PRICE: "0.64",
       },
     },
   ];
+  const exitProfiles = [
+    { name: "tp30_f70_s70", takeProfit: "1.3", finalTp: "0.7", finalSl: "0.7" },
+    { name: "tp30_f70_s90", takeProfit: "1.3", finalTp: "0.7", finalSl: "0.9" },
+    { name: "tp40_f90_s70", takeProfit: "1.4", finalTp: "0.9", finalSl: "0.7" },
+    { name: "tp40_f90_s90", takeProfit: "1.4", finalTp: "0.9", finalSl: "0.9" },
+  ];
+
+  const specs: Array<{ name: string; profile: Profile; env: Record<string, string> }> = [];
+  for (const entryProfile of entryProfiles) {
+    for (const exitProfile of exitProfiles) {
+      specs.push({
+        name: `${entryProfile.name}_${exitProfile.name}`,
+        profile: entryProfile.profile,
+        env: {
+          ...baseEnv,
+          ...entryProfile.env,
+          GME_TAKE_PROFIT_MULTIPLIER: exitProfile.takeProfit,
+          GME_FINAL_TAKE_PROFIT_RATIO: exitProfile.finalTp,
+          GME_FINAL_STOP_LOSS_RATIO: exitProfile.finalSl,
+        },
+      });
+    }
+  }
 
   return specs.map((spec) => ({
     ...spec,
@@ -918,6 +745,18 @@ function pickTestWinner(variants: Variant[]): Variant {
   })[0]!;
 }
 
+function pickValidationWinner(variants: Variant[]): Variant {
+  return [...variants].sort((a, b) => {
+    const aValidation = a.validation!;
+    const bValidation = b.validation!;
+    if (bValidation.pnl !== aValidation.pnl) return bValidation.pnl - aValidation.pnl;
+    if (aValidation.maxDrawdown !== bValidation.maxDrawdown) {
+      return aValidation.maxDrawdown - bValidation.maxDrawdown;
+    }
+    return bValidation.trades - aValidation.trades;
+  })[0]!;
+}
+
 function compactResult(result: Result) {
   return {
     markets: result.markets,
@@ -955,7 +794,8 @@ async function main() {
   for (const variant of variants) {
     variant.test = summarize(test, variant.config, { includeTrades: true });
   }
-  const winner = pickTestWinner(variants);
+  const validationWinner = pickValidationWinner(variants);
+  const testWinner = pickTestWinner(variants);
 
   const validationTable = variants
     .map((variant) => ({
@@ -996,14 +836,21 @@ async function main() {
           test: compactResult(variant.test!),
         })),
         testSelectionPolicy:
-          "All variants were evaluated on the test split as requested; winner is highest test pnl, then lower drawdown, then more trades.",
+          "Validation is used for tuning diagnostics and all variants are evaluated on the test split once. Per the current request, winner is the test best profile; this is not an unbiased holdout estimate.",
         testTable,
+        validationWinner: {
+          name: validationWinner.name,
+          profile: validationWinner.profile,
+          env: validationWinner.env,
+          validation: compactResult(validationWinner.validation!),
+          test: compactResult(validationWinner.test!),
+        },
         winner: {
-          name: winner.name,
-          profile: winner.profile,
-          env: winner.env,
-          validation: compactResult(winner.validation!),
-          test: compactResult(winner.test!),
+          name: testWinner.name,
+          profile: testWinner.profile,
+          env: testWinner.env,
+          validation: compactResult(testWinner.validation!),
+          test: compactResult(testWinner.test!),
         },
       },
       null,
