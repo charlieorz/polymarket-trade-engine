@@ -48,12 +48,28 @@ describe("trade window image renderer", () => {
         market: { assetPrice: 77635, priceToBeat: 77643, gap: -8 },
       },
       {
+        ts: start + 90_010,
+        type: "order_requested",
+        requestId,
+        signalId,
+        action: "buy",
+        side: "DOWN",
+        orderType: "GTC",
+        price: 0.9,
+        shares: 6,
+        requestedAtMs: start + 90_010,
+        label: "unit-test",
+        metrics: { gapSafety: 42, rsi: 30 },
+        market: { assetPrice: 77635, priceToBeat: 77643, gap: -8 },
+      },
+      {
         ts: start + 90_120,
         type: "order",
         requestId,
         signalId,
         action: "buy",
         side: "DOWN",
+        orderType: "GTC",
         status: "placed",
         price: 0.9,
         shares: 6,
@@ -62,6 +78,20 @@ describe("trade window image renderer", () => {
         requestLatencyMs: 80,
         metrics: { gapSafety: 43, rsi: 29 },
         market: { assetPrice: 77634, priceToBeat: 77643, gap: -9 },
+      },
+      {
+        ts: start + 92_500,
+        type: "order",
+        requestId,
+        signalId,
+        action: "buy",
+        side: "DOWN",
+        orderType: "GTC",
+        status: "expired",
+        price: 0.9,
+        shares: 6,
+        label: "unit-test",
+        metrics: { exitReason: "ttl expired", gapSafety: 43 },
       },
       {
         ts: start + 150_000,
@@ -102,6 +132,8 @@ describe("trade window image renderer", () => {
     expect(svg).toContain('data-marker-shape="square-pointer"');
     expect(svg).toContain('data-role="right-axis-label" x="1418"');
     expect(svg).toContain("PnL +$0.50");
+    expect(svg).toContain("EXPIRED GTC BUY DOWN");
+    expect(svg).toContain("ttl expired");
     expect(svg).toContain("策略识别指标");
     expect(svg).toContain("订单确认指标");
     expect(svg).toContain("Noto Sans CJK SC");

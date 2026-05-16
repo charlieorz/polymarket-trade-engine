@@ -5,7 +5,7 @@
 - `gap > 0` 买 `UP`
 - `gap < 0` 买 `DOWN`
 
-策略默认每个市场最多成功入场 1 次，每次固定买入 6 份，入场窗口为开盘后 `[60s, 250s]`，最后 40 秒只管理已有仓位。
+策略默认每个市场最多成功入场 1 次，每次固定买入 6 份，入场和普通止盈窗口为开盘后 `[120s, 250s]`，最后 `[260s, 300s]` 只做尾段止盈/盈利退出/持有到结算判断。
 
 ## 运行
 
@@ -19,6 +19,7 @@ bun run index.ts --strategy gap-momentum-edge --rounds 10 --always-log
 
 - 入场不是只看 `price < 0.6`，而是要求 `pFair - price - costBuffer >= minNetEdge`。
 - `pFair` 由当前优势侧 gap、ATR 波动和剩余时间估算。gap 越大、剩余时间越短、波动越低，结算概率越高。
+- 新增累计 gap 因子：每次统计更新累加有符号 gap。入场方向必须同时与当前 gap 和累计 gap 方向一致，避免只因为瞬时跳动反向追入。
 - GTC 入场使用被动价格，默认挂在 best ask 下方，避免主动吃单。
 - 普通 30% 止盈使用 FOK，以当前 bid 兑现，避免 GTC 挂单过期后错过退出。
 - 最后 40 秒内，`bid >= 0.9` 的直接止盈也使用 FOK。
@@ -31,7 +32,7 @@ bun run index.ts --strategy gap-momentum-edge --rounds 10 --always-log
 | --- | --- | --- |
 | `GME_SHARES` | 单次固定买入份数 | `6` |
 | `GME_MAX_ENTRIES_PER_MARKET` | 单市场最大成功入场次数 | `1` |
-| `GME_NO_ENTRY_FIRST_SECONDS` | 前多少秒不入场 | `60` |
+| `GME_NO_ENTRY_FIRST_SECONDS` | 前多少秒不入场 | `120` |
 | `GME_MAX_ENTRY_ELAPSED_SECONDS` | 最晚入场 elapsed 秒数 | `250` |
 | `GME_FINAL_WINDOW_SECONDS` | 尾段管理窗口 | `40` |
 | `GME_HOLD_ONLY_SECONDS` | 最后强制持有秒数 | `5` |
@@ -43,11 +44,15 @@ bun run index.ts --strategy gap-momentum-edge --rounds 10 --always-log
 | `GME_MAX_ENTRY_PRICE` | 最大入场价格 | `0.6` |
 | `GME_TAKE_PROFIT_MULTIPLIER` | 普通止盈倍率 | `1.3` |
 | `GME_FINAL_DIRECT_TP_BID` | 尾段直接止盈 bid 阈值 | `0.9` |
-| `GME_MIN_ABS_GAP` | 最小绝对 gap | `8` |
-| `GME_MIN_GAP_ATR` | 最小 gap/ATR | `2` |
-| `GME_MIN_PEAK_RETAIN_RATIO` | 最小 peak retain ratio | `0.75` |
-| `GME_MIN_TREND_CONSISTENCY` | 最小趋势一致性 | `0.6` |
-| `GME_MIN_NET_EDGE` | 最小净 edge | `0.03` |
+| `GME_MIN_ABS_GAP` | 最小绝对 gap | `3.5` |
+| `GME_MIN_GAP_ATR` | 最小 gap/ATR | `0.85` |
+| `GME_MIN_PEAK_RETAIN_RATIO` | 最小 peak retain ratio | `0.48` |
+| `GME_MIN_TREND_CONSISTENCY` | 最小趋势一致性 | `0.38` |
+| `GME_MIN_SIDE_VELOCITY_EMA` | 最小优势侧 gap 动量 EMA | `-0.18` |
+| `GME_MIN_CUMULATIVE_GAP` | 累计 gap 同向最小阈值 | `500` |
+| `GME_MIN_NET_EDGE` | 最小净 edge | `0.004` |
+
+当前默认参数来自 `logs/` 下 673 个可回放 BTC 5m 市场的固定 seed 随机切分回放。按本轮要求，12 组偏激进参数均在 test 集评价，并选择 test PnL 最高的 `aggressive_a6_cum500`。该组合在 validation 集仍为负，后续模拟盘应重点观察样本外稳定性。
 
 ## 风险边界
 

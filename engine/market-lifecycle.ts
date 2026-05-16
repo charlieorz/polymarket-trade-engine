@@ -617,6 +617,7 @@ export class MarketLifecycle {
         label: item.analysis?.label,
         action: item.req.action,
         side,
+        orderType: item.req.orderType,
         price: item.req.price,
         shares: item.req.shares,
         requestedAtMs: item.requestedAtMs,
@@ -714,6 +715,7 @@ export class MarketLifecycle {
             label: sell.label,
             action: "sell",
             side,
+            orderType: "GTC",
             price: bestBid,
             shares: sell.shares,
             requestedAtMs,
@@ -1113,6 +1115,7 @@ export class MarketLifecycle {
       analysis?: { signalId?: string; label?: string };
       label?: string;
       action: "buy" | "sell";
+      orderType?: "GTC" | "FOK";
       tokenId: string;
       price: number;
       shares: number;
@@ -1139,6 +1142,7 @@ export class MarketLifecycle {
       label: order.label ?? order.analysis?.label,
       action: order.action,
       side: this._side(order.tokenId),
+      orderType: order.orderType,
       price: order.price,
       shares: opts?.shares ?? order.shares,
       status,

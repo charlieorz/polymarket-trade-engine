@@ -30,6 +30,7 @@ type OrderPoint = {
   signalId?: string;
   action: Action;
   side: Side;
+  orderType?: "GTC" | "FOK";
   status: string;
   price: number;
   shares?: number;
@@ -51,6 +52,8 @@ const METRIC_PRIORITY = [
   "exitReason",
   "gap",
   "absGap",
+  "cumulativeGap",
+  "cumulativeGapSide",
   "currentSideGap",
   "peakSideGap",
   "settlementHold",
@@ -82,6 +85,7 @@ const METRIC_PRIORITY = [
   "bestBid",
   "entryPrice",
   "takeProfitPrice",
+  "orderType",
   "stopLossPrice",
   "unrealizedEdge",
   "entryAsk",
@@ -280,15 +284,18 @@ function fitPricePointsToWindow(
 }
 
 function collectOrders(entries: LogEntry[]): OrderPoint[] {
-  const orders = entries
+  const orderEvents = entries
     .filter((e) => e.type === "order")
-    .filter((e) => e.status === "placed" || e.status === "filled")
+    .filter((e) =>
+      ["placed", "filled", "expired", "canceled", "failed"].includes(String(e.status)),
+    )
     .map((e) => ({
       ts: e.ts,
       requestId: e.requestId,
       signalId: e.signalId,
       action: e.action as Action,
       side: e.side as Side,
+      orderType: e.orderType,
       status: e.status as string,
       price: e.price as number,
       shares: e.shares,
@@ -299,19 +306,53 @@ function collectOrders(entries: LogEntry[]): OrderPoint[] {
       market: e.market,
     }));
 
-  const byActionSide = new Map<string, OrderPoint[]>();
-  for (const order of orders) {
-    const key = `${order.action}:${order.side}`;
-    byActionSide.set(key, [...(byActionSide.get(key) ?? []), order]);
+  const requested = entries
+    .filter((e) => e.type === "order_requested")
+    .map((e) => ({
+      ts: e.ts,
+      requestId: e.requestId,
+      signalId: e.signalId,
+      action: e.action as Action,
+      side: e.side as Side,
+      orderType: e.orderType,
+      status: "requested",
+      price: e.price as number,
+      shares: e.shares,
+      label: e.label,
+      metrics: e.metrics,
+      market: e.market,
+    }));
+
+  const byRequest = new Map<string, OrderPoint[]>();
+  for (const order of [...requested, ...orderEvents]) {
+    const key =
+      order.requestId ?? `${order.ts}:${order.action}:${order.side}:${order.price}`;
+    byRequest.set(key, [...(byRequest.get(key) ?? []), order]);
   }
   const resolved: OrderPoint[] = [];
-  for (const group of byActionSide.values()) {
-    const filled = group.filter((order) => order.status === "filled");
-    if (filled.length > 0) {
-      resolved.push(...filled);
-      continue;
-    }
-    resolved.push(...group.filter((order) => order.status === "placed"));
+  const statusRank: Record<string, number> = {
+    filled: 5,
+    expired: 4,
+    canceled: 3,
+    failed: 2,
+    placed: 1,
+    requested: 0,
+  };
+  for (const group of byRequest.values()) {
+    const best = [...group].sort((a, b) => {
+      const rankDiff = (statusRank[b.status] ?? -1) - (statusRank[a.status] ?? -1);
+      if (rankDiff !== 0) return rankDiff;
+      return b.ts - a.ts;
+    })[0]!;
+    const placed = group.find((order) => order.status === "placed");
+    resolved.push({
+      ...best,
+      ts: best.status === "filled" ? best.ts : placed?.ts ?? best.ts,
+      requestLatencyMs: best.requestLatencyMs ?? placed?.requestLatencyMs,
+      signalLatencyMs: best.signalLatencyMs ?? placed?.signalLatencyMs,
+      metrics: best.metrics ?? placed?.metrics,
+      market: best.market ?? placed?.market,
+    });
   }
   return resolved.sort((a, b) => a.ts - b.ts);
 }
@@ -388,11 +429,11 @@ function renderMetricChips(params: {
   let rendered = 0;
 
   for (const [key, value] of pairs) {
-    const label = truncate(`${key}: ${fmt(value)}`, 24);
-    const w = Math.min(180, Math.max(58, label.length * 8 + 18));
+    const label = truncate(`${key}: ${fmt(value)}`, 32);
+    const w = Math.min(236, Math.max(58, label.length * 8 + 18));
     if (x + w > params.x + params.width) {
       line++;
-      if (line >= 2) break;
+      if (line >= 3) break;
       x = params.x;
       y += 27;
     }
@@ -403,7 +444,7 @@ function renderMetricChips(params: {
     rendered++;
   }
 
-  if (rendered < pairs.length && line < 2) {
+  if (rendered < pairs.length && line < 3) {
     chips.push(
       `<text x="${x}" y="${y + 16}" fill="#64748b" font-size="15">+${pairs.length - rendered}</text>`,
     );
@@ -417,16 +458,19 @@ function renderOrderMarker(params: {
   y: number;
   color: string;
   letter: string;
+  status: string;
 }): string {
-  const { x, y, color, letter } = params;
+  const { x, y, color, letter, status } = params;
   const box = 26;
   const boxX = x - box / 2;
   const boxY = y - 40;
   const triY = boxY + box;
+  const fillOpacity = status === "filled" ? "1" : "0.25";
+  const strokeDash = status === "filled" ? "" : 'stroke-dasharray="4 3"';
   return `
     <g data-marker-shape="square-pointer">
-      <rect x="${boxX}" y="${boxY}" width="${box}" height="${box}" rx="4" fill="${color}" stroke="#f8fafc" stroke-width="2"/>
-      <path d="M ${x - 8} ${triY} L ${x + 8} ${triY} L ${x} ${y} Z" fill="${color}" stroke="#f8fafc" stroke-width="2" stroke-linejoin="round"/>
+      <rect x="${boxX}" y="${boxY}" width="${box}" height="${box}" rx="4" fill="${color}" fill-opacity="${fillOpacity}" stroke="#f8fafc" stroke-width="2" ${strokeDash}/>
+      <path d="M ${x - 8} ${triY} L ${x + 8} ${triY} L ${x} ${y} Z" fill="${color}" fill-opacity="${fillOpacity}" stroke="#f8fafc" stroke-width="2" stroke-linejoin="round" ${strokeDash}/>
       <text x="${x}" y="${boxY + 18}" text-anchor="middle" font-size="17" font-weight="800" fill="#071018">${letter}</text>
     </g>`;
 }
@@ -480,10 +524,10 @@ export function buildTradeWindowSvgFromLog(
     (finalGap == null ? null : finalGap >= 0 ? "UP" : "DOWN");
 
   const width = 1600;
-  const height = 1000;
+  const height = 1120;
   const chart = { x: 80, y: 170, w: 1318, h: 470 };
   const axisLabelX = 1418;
-  const table = { x: 80, y: 706, w: 1440, rowH: 92 };
+  const table = { x: 80, y: 706, w: 1440, rowH: 110 };
   // 底部指标区的列宽需要显式固定，避免交易标题、延迟与指标 chip 在 PNG 中互相覆盖。
   // 这里给“交易”列预留更宽空间，主要是兼容 SELL DOWN 这类最长标题。
   const tableColumns = {
@@ -550,6 +594,7 @@ export function buildTradeWindowSvgFromLog(
         y: yForPrice(p),
         color: sideColor(o.side),
         letter: o.action === "buy" ? "B" : "S",
+        status: o.status,
       });
     })
     .join("");
@@ -562,10 +607,20 @@ export function buildTradeWindowSvgFromLog(
         ? `${(o.signalLatencyMs / 1000).toFixed(3)}s`
         : "-";
     // 标题只承担“交易方向/价格/数量”的快速定位职责，过长时截断，详细上下文放在右侧指标 chip。
+    const reason =
+      typeof o.metrics?.exitReason === "string" && o.metrics.exitReason
+        ? o.metrics.exitReason
+        : o.label ?? "";
+    const orderType = o.orderType ? `${o.orderType} ` : "";
     const title = truncate(
-      `${o.action.toUpperCase()} ${o.side} @ ${fmt(o.price)} ${o.shares ? `x ${fmt(o.shares)}` : ""}`,
-      34,
+      `${o.status.toUpperCase()} ${orderType}${o.action.toUpperCase()} ${o.side} @ ${fmt(o.price)} ${o.shares ? `x ${fmt(o.shares)}` : ""}${reason ? ` ${reason}` : ""}`,
+      48,
     );
+    const orderMetrics = {
+      status: o.status,
+      ...(o.orderType ? { orderType: o.orderType } : {}),
+      ...o.metrics,
+    };
     return `
       <g>
         <line x1="${table.x}" y1="${y - 26}" x2="${table.x + table.w}" y2="${y - 26}" stroke="#1f2b35"/>
@@ -580,7 +635,7 @@ export function buildTradeWindowSvgFromLog(
           text: "#cbd5e1",
         })}
         ${renderMetricChips({
-          metrics: o.metrics,
+          metrics: orderMetrics,
           x: tableColumns.confirmX,
           y: y - 20,
           width: tableColumns.confirmW,
@@ -611,7 +666,7 @@ export function buildTradeWindowSvgFromLog(
     <text x="${tableColumns.signalX}" y="${table.y + 34}" fill="#64748b" font-size="16">策略识别指标</text>
     <text x="${tableColumns.confirmX}" y="${table.y + 34}" fill="#64748b" font-size="16">订单确认指标</text>
     ${rows.join("")}
-    <text x="88" y="964" fill="#64748b" font-size="18">B/S 为订单确认时机；UP 使用绿色，DOWN 使用红色。</text>
+    <text x="88" y="1084" fill="#64748b" font-size="18">B/S 为订单确认时机；实心代表已成交，虚线/半透明代表未成交或过期；UP 使用绿色，DOWN 使用红色。</text>
   </svg>`;
 }
 

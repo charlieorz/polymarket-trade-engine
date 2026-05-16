@@ -37,6 +37,7 @@ function readyStats() {
     sideVelocityEma: { UP: 0.4, DOWN: 0.4 },
     gapHistory: [4, 6, 8, 10, 12, 14, 16],
     peakSideGap: { UP: 16, DOWN: 0 },
+    cumulativeGap: 700,
   };
 }
 
@@ -62,8 +63,9 @@ describe("gap-momentum-edge", () => {
     expect(config.takeProfitOrderType).toBe("FOK");
     expect(config.finalDirectTakeProfitOrderType).toBe("FOK");
     expect(config.finalExitOrderType).toBe("FOK");
-    expect(config.noEntryFirstSeconds).toBe(60);
+    expect(config.noEntryFirstSeconds).toBe(120);
     expect(config.maxEntryElapsedSeconds).toBe(250);
+    expect(config.minCumulativeGap).toBe(500);
   });
 
   test("computes fair probability from volatility and time", () => {
@@ -144,13 +146,38 @@ describe("gap-momentum-edge", () => {
     expect(entry).toBeNull();
   });
 
-  test("blocks entry before elapsed 60 seconds", () => {
+  test("blocks entry before elapsed 120 seconds", () => {
     const entry = __gapMomentumEdgeTestHooks.chooseEntry({
       ctx: mockCtx(),
       gap: 16,
       remaining: 245,
-      elapsed: 59,
+      elapsed: 119,
       stats: readyStats(),
+      state: {
+        entries: 0,
+        pendingEntry: false,
+        position: null,
+        closing: false,
+        released: false,
+        settlementHoldLogged: false,
+      },
+      config: __gapMomentumEdgeTestHooks.readGapMomentumEdgeConfig({
+        GME_MIN_NET_EDGE: "0.01",
+      }),
+    });
+    expect(entry).toBeNull();
+  });
+
+  test("requires cumulative gap to agree with the current entry side", () => {
+    const entry = __gapMomentumEdgeTestHooks.chooseEntry({
+      ctx: mockCtx(),
+      gap: 16,
+      remaining: 160,
+      elapsed: 140,
+      stats: {
+        ...readyStats(),
+        cumulativeGap: -20,
+      },
       state: {
         entries: 0,
         pendingEntry: false,
@@ -175,6 +202,7 @@ describe("gap-momentum-edge", () => {
       bid: 0.76,
       bidLiquidity: 20,
       remaining: 120,
+      elapsed: 180,
       stats: readyStats(),
     });
     expect(exit?.orderType).toBe("FOK");
@@ -191,6 +219,7 @@ describe("gap-momentum-edge", () => {
       bid: 0.92,
       bidLiquidity: 20,
       remaining: 5,
+      elapsed: 295,
       stats: readyStats(),
     });
     expect(exit).toBeNull();
@@ -205,6 +234,7 @@ describe("gap-momentum-edge", () => {
       bid: 0.92,
       bidLiquidity: 20,
       remaining: 30,
+      elapsed: 270,
       stats: readyStats(),
     });
     expect(exit?.orderType).toBe("FOK");
@@ -221,6 +251,7 @@ describe("gap-momentum-edge", () => {
       bid: 0.4,
       bidLiquidity: 20,
       remaining: 20,
+      elapsed: 280,
       stats: {
         ...readyStats(),
         atr: 2,

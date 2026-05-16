@@ -38,6 +38,7 @@ type Config = {
   minPeakRetainRatio: number;
   minTrendConsistency: number;
   minSideVelocityEma: number;
+  minCumulativeGap: number;
   minNetEdge: number;
   costBuffer: number;
   sigmaMultiplier: number;
@@ -59,6 +60,7 @@ type EdgeStats = {
   lastGap: number | null;
   lastUpdateMs: number;
   peakSideGap: Record<Side, number>;
+  cumulativeGap: number;
 };
 
 type BookQuality = {
@@ -84,6 +86,8 @@ type EntryDecision = {
   peakRetainRatio: number;
   trendConsistency: number;
   sideVelocityEma: number | null;
+  cumulativeGap: number;
+  cumulativeGapSide: number;
   takeProfitPrice: number;
 };
 
@@ -148,7 +152,7 @@ export function readGapMomentumEdgeConfig(
     atrPeriod: Math.max(2, parseNumberEnv(env, "GME_ATR_PERIOD", 14)),
     velocityEmaPeriod: Math.max(2, parseNumberEnv(env, "GME_VELOCITY_EMA_PERIOD", 6)),
     trendLookback: Math.max(3, Math.floor(parseNumberEnv(env, "GME_TREND_LOOKBACK", 10))),
-    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "GME_NO_ENTRY_FIRST_SECONDS", 60)),
+    noEntryFirstSeconds: Math.max(0, parseNumberEnv(env, "GME_NO_ENTRY_FIRST_SECONDS", 120)),
     maxEntryElapsedSeconds: Math.max(
       0,
       parseNumberEnv(env, "GME_MAX_ENTRY_ELAPSED_SECONDS", 250),
@@ -181,22 +185,23 @@ export function readGapMomentumEdgeConfig(
     maxSpread: Math.max(0, parseNumberEnv(env, "GME_MAX_SPREAD", 0.04)),
     minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "GME_MIN_ENTRY_LIQUIDITY_USD", 8)),
     minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "GME_MIN_EXIT_LIQUIDITY_USD", 5)),
-    minAbsGap: Math.max(0, parseNumberEnv(env, "GME_MIN_ABS_GAP", 8)),
-    minGapAtr: Math.max(0, parseNumberEnv(env, "GME_MIN_GAP_ATR", 2)),
-    earlyMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_EARLY_MIN_GAP_ATR", 3)),
+    minAbsGap: Math.max(0, parseNumberEnv(env, "GME_MIN_ABS_GAP", 3.5)),
+    minGapAtr: Math.max(0, parseNumberEnv(env, "GME_MIN_GAP_ATR", 0.85)),
+    earlyMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_EARLY_MIN_GAP_ATR", 0.85)),
     earlyRemainingSeconds: Math.max(
       0,
       parseNumberEnv(env, "GME_EARLY_REMAINING_SECONDS", 120),
     ),
-    lateMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_LATE_MIN_GAP_ATR", 1.5)),
+    lateMinGapAtr: Math.max(0, parseNumberEnv(env, "GME_LATE_MIN_GAP_ATR", 0.65)),
     lateRemainingSeconds: Math.max(
       0,
       parseNumberEnv(env, "GME_LATE_REMAINING_SECONDS", 60),
     ),
-    minPeakRetainRatio: clamp(parseNumberEnv(env, "GME_MIN_PEAK_RETAIN_RATIO", 0.75), 0, 1),
-    minTrendConsistency: clamp(parseNumberEnv(env, "GME_MIN_TREND_CONSISTENCY", 0.6), 0, 1),
-    minSideVelocityEma: parseNumberEnv(env, "GME_MIN_SIDE_VELOCITY_EMA", 0.05),
-    minNetEdge: Math.max(0, parseNumberEnv(env, "GME_MIN_NET_EDGE", 0.03)),
+    minPeakRetainRatio: clamp(parseNumberEnv(env, "GME_MIN_PEAK_RETAIN_RATIO", 0.48), 0, 1),
+    minTrendConsistency: clamp(parseNumberEnv(env, "GME_MIN_TREND_CONSISTENCY", 0.38), 0, 1),
+    minSideVelocityEma: parseNumberEnv(env, "GME_MIN_SIDE_VELOCITY_EMA", -0.18),
+    minCumulativeGap: Math.max(0, parseNumberEnv(env, "GME_MIN_CUMULATIVE_GAP", 500)),
+    minNetEdge: Math.max(0, parseNumberEnv(env, "GME_MIN_NET_EDGE", 0.004)),
     costBuffer: Math.max(0, parseNumberEnv(env, "GME_COST_BUFFER", 0.005)),
     sigmaMultiplier: Math.max(0.1, parseNumberEnv(env, "GME_SIGMA_MULTIPLIER", 1.25)),
     takeProfitMultiplier: Math.max(
@@ -274,6 +279,7 @@ function createEdgeStats(): EdgeStats {
     lastGap: null,
     lastUpdateMs: 0,
     peakSideGap: { UP: 0, DOWN: 0 },
+    cumulativeGap: 0,
   };
 }
 
@@ -317,6 +323,7 @@ function updateStats(
   const downSideGap = sideGap("DOWN", gap);
   stats.peakSideGap.UP = Math.max(stats.peakSideGap.UP, upSideGap);
   stats.peakSideGap.DOWN = Math.max(stats.peakSideGap.DOWN, downSideGap);
+  stats.cumulativeGap += gap;
 
   stats.gapHistory.push(gap);
   if (stats.gapHistory.length > config.trendLookback + 1) stats.gapHistory.shift();
@@ -415,6 +422,7 @@ function chooseEntry(params: {
   const peakRetainRatio = peak > 0 ? sideCurrentGap / peak : 0;
   const consistency = trendConsistency(side, params.stats.gapHistory);
   const velocityEma = params.stats.sideVelocityEma[side];
+  const cumulativeSideGap = sideGap(side, params.stats.cumulativeGap);
   const quality = bookQuality(params.ctx, side);
   if (!quality) return null;
 
@@ -426,6 +434,7 @@ function chooseEntry(params: {
   if (peakRetainRatio < config.minPeakRetainRatio) return null;
   if (consistency < config.minTrendConsistency) return null;
   if (velocityEma === null || velocityEma < config.minSideVelocityEma) return null;
+  if (cumulativeSideGap <= config.minCumulativeGap) return null;
 
   const tokenId = side === "UP" ? params.ctx.clobTokenIds[0] : params.ctx.clobTokenIds[1];
   const price =
@@ -466,6 +475,8 @@ function chooseEntry(params: {
     peakRetainRatio,
     trendConsistency: consistency,
     sideVelocityEma: velocityEma,
+    cumulativeGap: params.stats.cumulativeGap,
+    cumulativeGapSide: cumulativeSideGap,
     takeProfitPrice: roundPrice(
       Math.min(price * config.takeProfitMultiplier, config.takeProfitMaxPrice),
     ),
@@ -491,6 +502,7 @@ function chooseExit(params: {
   bid: number | null;
   bidLiquidity: number;
   remaining: number;
+  elapsed: number;
   stats: EdgeStats;
   config?: Config;
 }): ExitDecision | null {
@@ -561,6 +573,9 @@ function chooseExit(params: {
     return null;
   }
 
+  if (params.elapsed < config.noEntryFirstSeconds) return null;
+  if (params.elapsed > config.maxEntryElapsedSeconds) return null;
+
   if (!params.pos.takeProfitOrderPlaced && params.bid >= params.pos.takeProfitPrice) {
     const price =
       config.takeProfitOrderType === "GTC"
@@ -624,6 +639,8 @@ function metrics(params: {
       params.stats.sideVelocityEma[side] === null
         ? null
         : Number(params.stats.sideVelocityEma[side]!.toFixed(4)),
+    cumulativeGap: Number(params.stats.cumulativeGap.toFixed(2)),
+    cumulativeGapSide: Number(sideGap(side, params.stats.cumulativeGap).toFixed(2)),
     peakRetainRatio:
       params.stats.peakSideGap[side] > 0
         ? Number((activeSideGap / params.stats.peakSideGap[side]).toFixed(4))
@@ -633,6 +650,7 @@ function metrics(params: {
     entryPrice: params.entry?.price ?? params.pos?.entryPrice ?? null,
     entryAsk: params.entry?.ask ?? null,
     netEdge: params.entry?.netEdge === undefined ? null : Number(params.entry.netEdge.toFixed(4)),
+    takeProfitPrice: params.entry?.takeProfitPrice ?? params.pos?.takeProfitPrice ?? null,
     exitReason: params.exitReason ?? null,
   };
 }
@@ -867,6 +885,7 @@ export const gapMomentumEdge: Strategy = async (ctx) => {
       bid: bidInfo?.price ?? null,
       bidLiquidity: bidInfo?.liquidity ?? 0,
       remaining,
+      elapsed,
       stats,
     });
     if (!exit) return;
