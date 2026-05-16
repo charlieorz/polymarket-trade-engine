@@ -55,6 +55,7 @@ The repository ships with two strategies, both designed for simulation only. The
 |----------|-------------------|------|-------------|
 | Simulation | `simulation` | `engine/strategy/simulation.ts` | Minimal example. Places a buy at 0.49 immediately, sells at 0.70 on fill, and emergency sells if the sell hasn't filled 30 seconds before market close. Demonstrates `postOrders`, callback chaining, `expireAtMs`, `emergencySells`, and the cleanup return pattern for clearing timers on destroy. |
 | Late Entry | `late-entry` | `engine/strategy/late-entry.ts` | Event-driven strategy that waits for indicator conditions (ATR, gap safety, divergence, peak gap ratio) before entering late in the market window. Demonstrates `ctx.hold()`, `setInterval`-based market ticking, indicator computation, stop-loss logic, and emergency exits. |
+| Gap Momentum Edge | `gap-momentum-edge` | `engine/strategy/gap-momentum-edge.ts` | BTC 5m simulation-first strategy that buys only the current gap-advantage side, uses short-TTL GTC maker entries, GTC profit-taking, FOK-only profitable final exits, and never sells a losing position. |
 
 ```bash
 # Run the simulation strategy for 10 rounds
@@ -62,6 +63,9 @@ bun run index.ts --strategy simulation --rounds 10
 
 # Run the late-entry strategy for 5 rounds
 bun run index.ts --strategy late-entry --rounds 5
+
+# Run the gap-momentum-edge strategy for 10 rounds
+bun run index.ts --strategy gap-momentum-edge --rounds 10 --always-log
 ```
 
 ---
