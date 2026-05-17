@@ -42,19 +42,19 @@ bun run index.ts --strategy gap-momentum-edge --rounds 10 --always-log
 | `GME_TAKE_PROFIT_ORDER_TYPE` | 普通止盈订单类型 | `FOK` |
 | `GME_FINAL_DIRECT_TP_ORDER_TYPE` | 最后 40 秒直接止盈订单类型 | `FOK` |
 | `GME_FINAL_EXIT_ORDER_TYPE` | 尾段止损订单类型 | `FOK` |
-| `GME_MAX_ENTRY_PRICE` | 最大入场价格 | `0.6` |
-| `GME_TAKE_PROFIT_MULTIPLIER` | 普通止盈倍率 | `1.4` |
-| `GME_FINAL_TAKE_PROFIT_RATIO` | 尾段止盈 bid 阈值 | `0.9` |
-| `GME_FINAL_STOP_LOSS_RATIO` | 尾段反方向概率止损阈值 | `0.7` |
-| `GME_MIN_ABS_GAP` | 最小绝对 gap | `3.5` |
-| `GME_MIN_GAP_ATR` | 最小 gap/ATR | `0.85` |
-| `GME_MIN_PEAK_RETAIN_RATIO` | 最小 peak retain ratio | `0.5` |
-| `GME_MIN_TREND_CONSISTENCY` | 最小趋势一致性 | `0.38` |
-| `GME_MIN_SIDE_VELOCITY_EMA` | 最小优势侧 gap 动量 EMA | `-0.18` |
-| `GME_MIN_CUMULATIVE_GAP` | 累计 gap 同向最小阈值 | `20` |
-| `GME_MIN_NET_EDGE` | 最小净 edge | `0.008` |
+| `GME_MAX_ENTRY_PRICE` | 最大入场价格 | `0.64` |
+| `GME_TAKE_PROFIT_MULTIPLIER` | 普通止盈倍率 | `1.3` |
+| `GME_FINAL_TAKE_PROFIT_RATIO` | 尾段止盈 bid 阈值 | `0.7` |
+| `GME_FINAL_STOP_LOSS_RATIO` | 尾段反方向概率止损阈值 | `0.9` |
+| `GME_MIN_ABS_GAP` | 最小绝对 gap | `2` |
+| `GME_MIN_GAP_ATR` | 最小 gap/ATR | `0.5` |
+| `GME_MIN_PEAK_RETAIN_RATIO` | 最小 peak retain ratio | `0.35` |
+| `GME_MIN_TREND_CONSISTENCY` | 最小趋势一致性 | `0.25` |
+| `GME_MIN_SIDE_VELOCITY_EMA` | 最小优势侧 gap 动量 EMA | `-0.35` |
+| `GME_MIN_CUMULATIVE_GAP` | 累计 gap 同向最小阈值 | `0` |
+| `GME_MIN_NET_EDGE` | 最小净 edge | `0` |
 
-当前默认参数来自 `logs/` 下 685 个可回放 BTC 5m 市场的固定 seed 随机切分回放。参数集覆盖保守、均衡和激进共 16 组，validation 用于调参诊断；按当前要求，默认组合使用 test 表现最优的 `neutral_tp40_f90_s70`。该组合在 test 集仍为负，不能据此直接扩大实盘规模。
+当前配置按参与市场数量优先使用 `loose_tp30_f70_s90`。该组合更激进，历史 test PnL 为负，后续模拟盘应重点观察回撤，不能据此直接扩大实盘规模。
 
 ## 风险边界
 

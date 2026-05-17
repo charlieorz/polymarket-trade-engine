@@ -65,12 +65,12 @@ describe("gap-momentum-edge", () => {
     expect(config.finalExitOrderType).toBe("FOK");
     expect(config.noEntryFirstSeconds).toBe(60);
     expect(config.maxEntryElapsedSeconds).toBe(250);
-    expect(config.minCumulativeGap).toBe(20);
-    expect(config.takeProfitMultiplier).toBe(1.4);
+    expect(config.minCumulativeGap).toBe(0);
+    expect(config.takeProfitMultiplier).toBe(1.3);
     expect(config.finalActionStartElapsedSeconds).toBe(260);
     expect(config.finalActionEndElapsedSeconds).toBe(295);
-    expect(config.finalTakeProfitRatio).toBe(0.9);
-    expect(config.finalStopLossRatio).toBe(0.7);
+    expect(config.finalTakeProfitRatio).toBe(0.7);
+    expect(config.finalStopLossRatio).toBe(0.9);
   });
 
   test("computes fair probability from volatility and time", () => {
