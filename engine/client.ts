@@ -58,7 +58,7 @@ export type MultiOrderRequest = {
   tickSize: string;
   negRisk: boolean;
   feeRateBps: number; // deprecated field not used in v2
-  orderType?: "GTC" | "FOK";
+  orderType?: "GTC" | "FOK" | "FAK";
 };
 
 export type PlacedOrder = {
@@ -163,8 +163,8 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
         }
       }
 
-      // FOK: fill immediately or reject — matches real CLOB behavior
-      if (req.orderType === "FOK") {
+      // FOK/FAK: fill immediately or reject in the local simulator.
+      if (req.orderType === "FOK" || req.orderType === "FAK") {
         const book = this.getBook(req.tokenId);
         if (isSimFilled(req, book)) {
           const orderId = crypto.randomUUID();
@@ -190,7 +190,9 @@ export class EarlyBirdSimClient implements EarlyBirdClient {
           status: "",
           success: true,
           errorMsg:
-            "order couldn't be fully filled. FOK orders are fully filled or killed.",
+            req.orderType === "FAK"
+              ? "order couldn't be filled immediately. FAK orders are filled or killed in sim."
+              : "order couldn't be fully filled. FOK orders are fully filled or killed.",
         };
       }
 
@@ -436,6 +438,8 @@ export class PolymarketEarlyBirdClient implements EarlyBirdClient {
         orderType:
           orders[i]!.orderType === "FOK"
             ? ClobOrderType.FOK
+            : orders[i]!.orderType === "FAK"
+              ? ClobOrderType.FAK
             : ClobOrderType.GTC,
       })),
     );

@@ -25,7 +25,7 @@ export type PendingOrder = {
   orderId: string;
   tokenId: string;
   action: "buy" | "sell";
-  orderType?: "GTC" | "FOK";
+  orderType?: "GTC" | "FOK" | "FAK";
   price: number;
   shares: number;
   expireAtMs: number;
@@ -1115,7 +1115,7 @@ export class MarketLifecycle {
       analysis?: { signalId?: string; label?: string };
       label?: string;
       action: "buy" | "sell";
-      orderType?: "GTC" | "FOK";
+      orderType?: "GTC" | "FOK" | "FAK";
       tokenId: string;
       price: number;
       shares: number;

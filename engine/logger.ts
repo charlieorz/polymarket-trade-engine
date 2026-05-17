@@ -17,7 +17,7 @@ type LogEntry =
       label?: string;
       action: "buy" | "sell";
       side: string;
-      orderType?: "GTC" | "FOK";
+      orderType?: "GTC" | "FOK" | "FAK";
       price: number;
       shares?: number;
       cost?: number;
@@ -38,7 +38,7 @@ type LogEntry =
       label?: string;
       action: "buy" | "sell";
       side: "UP" | "DOWN";
-      orderType?: "GTC" | "FOK";
+      orderType?: "GTC" | "FOK" | "FAK";
       price: number;
       shares: number;
       requestedAtMs: number;

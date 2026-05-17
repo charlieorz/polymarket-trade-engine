@@ -30,7 +30,7 @@ type OrderPoint = {
   signalId?: string;
   action: Action;
   side: Side;
-  orderType?: "GTC" | "FOK";
+  orderType?: "GTC" | "FOK" | "FAK";
   status: string;
   price: number;
   shares?: number;
