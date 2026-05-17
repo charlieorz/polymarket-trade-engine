@@ -155,7 +155,7 @@ export function readBtc5mArbConfig(
     velocityEmaPeriod: Math.max(2, parseNumberEnv(env, "B5A_VELOCITY_EMA_PERIOD", 5)),
     trendLookback: Math.max(3, Math.floor(parseNumberEnv(env, "B5A_TREND_LOOKBACK", 8))),
     shares: Math.max(0.01, parseNumberEnv(env, "B5A_SHARES", 6)),
-    entryStartElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_START_SECONDS", 127)),
+    entryStartElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_START_SECONDS", 67)),
     entryEndElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_END_SECONDS", 257)),
     managedExitStartElapsedSeconds: Math.max(
       0,

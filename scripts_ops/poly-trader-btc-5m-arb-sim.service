@@ -1,0 +1,21 @@
+[Unit]
+Description=Polymarket BTC 5m Arb simulation trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=poly
+Group=poly
+WorkingDirectory=/home/poly/polymarket-trade-engine
+Environment=APP_DIR=/home/poly/polymarket-trade-engine
+Environment=ENV_FILE=/home/poly/polymarket-trade-engine/.env.sim
+Environment=BUN_EXECUTABLE=/home/poly/.bun/bin/bun
+ExecStart=/home/poly/polymarket-trade-engine/scripts_ops/run_sim_btc_5m_arb.sh
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

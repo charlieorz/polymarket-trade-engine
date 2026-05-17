@@ -81,7 +81,7 @@ describe("btc-5m-arb", () => {
   test("parses the requested timing and order-type defaults", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({});
     expect(config.shares).toBe(6);
-    expect(config.entryStartElapsedSeconds).toBe(127);
+    expect(config.entryStartElapsedSeconds).toBe(67);
     expect(config.entryEndElapsedSeconds).toBe(257);
     expect(config.managedExitStartElapsedSeconds).toBe(267);
     expect(config.holdOnlyStartElapsedSeconds).toBe(297);
@@ -93,7 +93,7 @@ describe("btc-5m-arb", () => {
     expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.12);
   });
 
-  test("chooses an advantage entry only inside the 127-257 second window", () => {
+  test("chooses an advantage entry only inside the 67-257 second window", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({
       B5A_ADV_MIN_ABS_GAP: "4",
       B5A_ADV_MIN_MOMENTUM: "0.2",
@@ -116,7 +116,7 @@ describe("btc-5m-arb", () => {
       __btc5mArbTestHooks.chooseEntry({
         ctx: mockCtx(),
         gap: 10,
-        elapsed: 126,
+        elapsed: 66,
         stats: advantageStats(),
         state: baseState(),
         config,
