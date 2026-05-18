@@ -80,6 +80,7 @@ type Variant = {
   profile: Profile;
   env: Record<string, string>;
   config: B5aConfig;
+  train?: Result;
   validation?: Result;
   test?: Result;
 };
@@ -122,7 +123,11 @@ type PendingSell = {
 };
 
 const LOG_DIR = process.env.B5A_BACKTEST_LOG_DIR ?? "logs";
-const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-17";
+const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-18-smallfull-v1";
+const MIN_VALIDATION_TRADED_MARKETS = Math.max(
+  1,
+  Number(process.env.B5A_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 35),
+);
 const EPSILON = 1e-9;
 
 function round(value: number, digits = 4): number {
@@ -606,8 +611,8 @@ function buildVariants(): Variant[] {
     B5A_STATS_INTERVAL_MS: "1000",
     B5A_SHARES: "6",
     B5A_ENTRY_START_SECONDS: "67",
-    B5A_ENTRY_END_SECONDS: "257",
-    B5A_MANAGED_EXIT_START_SECONDS: "267",
+    B5A_ENTRY_END_SECONDS: "217",
+    B5A_MANAGED_EXIT_START_SECONDS: "222",
     B5A_HOLD_ONLY_START_SECONDS: "297",
     B5A_ENTRY_ORDER_TYPE: "GTC",
     B5A_TAKE_PROFIT_ORDER_TYPE: "GTC",
@@ -629,8 +634,74 @@ function buildVariants(): Variant[] {
         B5A_ADV_MIN_ABS_GAP: "6",
         B5A_ADV_MIN_MOMENTUM: "0.35",
         B5A_ADV_MIN_CUMULATIVE_GAP: "80",
+        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MAX_REVERSAL_PRICE: "0.49",
         B5A_REV_MAX_ABS_GAP: "3",
         B5A_REV_MIN_MOMENTUM: "0.35",
+      },
+    },
+    {
+      name: "balanced_a",
+      profile: "conservative",
+      env: {
+        B5A_MAX_SPREAD: "0.045",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "6",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "6",
+        B5A_ADV_MIN_ABS_GAP: "4",
+        B5A_ADV_MIN_MOMENTUM: "0.2",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "22",
+        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "5",
+        B5A_REV_MIN_MOMENTUM: "0.18",
+      },
+    },
+    {
+      name: "balanced_b",
+      profile: "conservative",
+      env: {
+        B5A_MAX_SPREAD: "0.05",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5A_ADV_MIN_ABS_GAP: "3.5",
+        B5A_ADV_MIN_MOMENTUM: "0.18",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "16",
+        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "5.5",
+        B5A_REV_MIN_MOMENTUM: "0.16",
+      },
+    },
+    {
+      name: "balanced_c",
+      profile: "aggressive",
+      env: {
+        B5A_MAX_SPREAD: "0.055",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5A_ADV_MIN_ABS_GAP: "3",
+        B5A_ADV_MIN_MOMENTUM: "0.16",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "12",
+        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MAX_REVERSAL_PRICE: "0.51",
+        B5A_REV_MAX_ABS_GAP: "6",
+        B5A_REV_MIN_MOMENTUM: "0.14",
+      },
+    },
+    {
+      name: "balanced_d",
+      profile: "aggressive",
+      env: {
+        B5A_MAX_SPREAD: "0.06",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
+        B5A_ADV_MIN_ABS_GAP: "3",
+        B5A_ADV_MIN_MOMENTUM: "0.14",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "10",
+        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MAX_REVERSAL_PRICE: "0.51",
+        B5A_REV_MAX_ABS_GAP: "6.5",
+        B5A_REV_MIN_MOMENTUM: "0.12",
       },
     },
     {
@@ -643,8 +714,42 @@ function buildVariants(): Variant[] {
         B5A_ADV_MIN_ABS_GAP: "5",
         B5A_ADV_MIN_MOMENTUM: "0.28",
         B5A_ADV_MIN_CUMULATIVE_GAP: "55",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
         B5A_REV_MAX_ABS_GAP: "4",
         B5A_REV_MIN_MOMENTUM: "0.28",
+      },
+    },
+    {
+      name: "conservative_c",
+      profile: "conservative",
+      env: {
+        B5A_MAX_SPREAD: "0.045",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "6",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "6",
+        B5A_ADV_MIN_ABS_GAP: "4.5",
+        B5A_ADV_MIN_MOMENTUM: "0.24",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "40",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "4.5",
+        B5A_REV_MIN_MOMENTUM: "0.24",
+      },
+    },
+    {
+      name: "conservative_d",
+      profile: "conservative",
+      env: {
+        B5A_MAX_SPREAD: "0.05",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5A_ADV_MIN_ABS_GAP: "4",
+        B5A_ADV_MIN_MOMENTUM: "0.22",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "30",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "5",
+        B5A_REV_MIN_MOMENTUM: "0.22",
       },
     },
     {
@@ -657,6 +762,8 @@ function buildVariants(): Variant[] {
         B5A_ADV_MIN_ABS_GAP: "4",
         B5A_ADV_MIN_MOMENTUM: "0.2",
         B5A_ADV_MIN_CUMULATIVE_GAP: "25",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.51",
         B5A_REV_MAX_ABS_GAP: "5",
         B5A_REV_MIN_MOMENTUM: "0.2",
       },
@@ -671,59 +778,149 @@ function buildVariants(): Variant[] {
         B5A_ADV_MIN_ABS_GAP: "3",
         B5A_ADV_MIN_MOMENTUM: "0.14",
         B5A_ADV_MIN_CUMULATIVE_GAP: "10",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.51",
         B5A_REV_MAX_ABS_GAP: "6",
         B5A_REV_MIN_MOMENTUM: "0.14",
       },
     },
+    {
+      name: "aggressive_c",
+      profile: "aggressive",
+      env: {
+        B5A_MAX_SPREAD: "0.055",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5A_ADV_MIN_ABS_GAP: "3.5",
+        B5A_ADV_MIN_MOMENTUM: "0.18",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "18",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.51",
+        B5A_REV_MAX_ABS_GAP: "5.5",
+        B5A_REV_MIN_MOMENTUM: "0.16",
+      },
+    },
+    {
+      name: "aggressive_d",
+      profile: "aggressive",
+      env: {
+        B5A_MAX_SPREAD: "0.06",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
+        B5A_ADV_MIN_ABS_GAP: "3",
+        B5A_ADV_MIN_MOMENTUM: "0.12",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "8",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.51",
+        B5A_REV_MAX_ABS_GAP: "6.5",
+        B5A_REV_MIN_MOMENTUM: "0.12",
+      },
+    },
   ];
 
-  const exitProfiles = [
+  const exitProfiles: Array<{ name: string; env: Record<string, string> }> = [
     {
-      name: "tp12_dyn24_stop52_67",
+      name: "small_full_stop15_35",
       env: {
-        B5A_MIN_TAKE_PROFIT_RATIO: "0.12",
-        B5A_MAX_TAKE_PROFIT_RATIO: "0.24",
-        B5A_DYNAMIC_TP_PRICE_WEIGHT: "0.06",
-        B5A_DYNAMIC_TP_GAP_WEIGHT: "0.04",
-        B5A_DYNAMIC_TP_MOMENTUM_WEIGHT: "0.02",
-        B5A_HALF_STOP_LOSS_RATIO: "0.52",
-        B5A_FULL_STOP_LOSS_RATIO: "0.67",
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.15",
+        B5A_FULL_STOP_LOSS_RATIO: "0.35",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.85",
       },
     },
     {
-      name: "tp12_dyn36_stop52_67",
+      name: "small_full_stop15_40",
       env: {
-        B5A_MIN_TAKE_PROFIT_RATIO: "0.12",
-        B5A_MAX_TAKE_PROFIT_RATIO: "0.36",
-        B5A_DYNAMIC_TP_PRICE_WEIGHT: "0.1",
-        B5A_DYNAMIC_TP_GAP_WEIGHT: "0.08",
-        B5A_DYNAMIC_TP_MOMENTUM_WEIGHT: "0.06",
-        B5A_HALF_STOP_LOSS_RATIO: "0.52",
-        B5A_FULL_STOP_LOSS_RATIO: "0.67",
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.15",
+        B5A_FULL_STOP_LOSS_RATIO: "0.4",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.85",
       },
     },
     {
-      name: "tp16_dyn42_stop55_70",
+      name: "small_full_stop20_40",
       env: {
-        B5A_MIN_TAKE_PROFIT_RATIO: "0.16",
-        B5A_MAX_TAKE_PROFIT_RATIO: "0.42",
-        B5A_DYNAMIC_TP_PRICE_WEIGHT: "0.11",
-        B5A_DYNAMIC_TP_GAP_WEIGHT: "0.1",
-        B5A_DYNAMIC_TP_MOMENTUM_WEIGHT: "0.05",
-        B5A_HALF_STOP_LOSS_RATIO: "0.55",
-        B5A_FULL_STOP_LOSS_RATIO: "0.7",
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.2",
+        B5A_FULL_STOP_LOSS_RATIO: "0.4",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
       },
     },
     {
-      name: "tp20_dyn48_stop58_72",
+      name: "small_full_stop20_45",
       env: {
-        B5A_MIN_TAKE_PROFIT_RATIO: "0.2",
-        B5A_MAX_TAKE_PROFIT_RATIO: "0.48",
-        B5A_DYNAMIC_TP_PRICE_WEIGHT: "0.12",
-        B5A_DYNAMIC_TP_GAP_WEIGHT: "0.1",
-        B5A_DYNAMIC_TP_MOMENTUM_WEIGHT: "0.06",
-        B5A_HALF_STOP_LOSS_RATIO: "0.58",
-        B5A_FULL_STOP_LOSS_RATIO: "0.72",
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.2",
+        B5A_FULL_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
+      },
+    },
+    {
+      name: "small_full_stop25_45",
+      env: {
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.25",
+        B5A_FULL_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
+      },
+    },
+    {
+      name: "small_full_stop25_50",
+      env: {
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.25",
+        B5A_FULL_STOP_LOSS_RATIO: "0.5",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.45",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
+      },
+    },
+    {
+      name: "small_full_stop30_50",
+      env: {
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.3",
+        B5A_FULL_STOP_LOSS_RATIO: "0.5",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.45",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.9",
+      },
+    },
+    {
+      name: "small_full_stop35_55",
+      env: {
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_HALF_STOP_LOSS_RATIO: "0.35",
+        B5A_FULL_STOP_LOSS_RATIO: "0.55",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.5",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.9",
       },
     },
   ];
@@ -759,7 +956,7 @@ function splitMarkets(markets: ReplayMarket[]) {
   return { train, validation, test };
 }
 
-function pickWinnerByPnl(variants: Variant[], split: "validation" | "test"): Variant {
+function pickWinnerByPnl(variants: Variant[], split: "train" | "validation" | "test"): Variant {
   return [...variants].sort((a, b) => {
     const left = a[split]!;
     const right = b[split]!;
@@ -767,6 +964,31 @@ function pickWinnerByPnl(variants: Variant[], split: "validation" | "test"): Var
     if (left.maxDrawdown !== right.maxDrawdown) return left.maxDrawdown - right.maxDrawdown;
     return right.trades - left.trades;
   })[0]!;
+}
+
+function isDefaultEligible(variant: Variant): boolean {
+  return (
+    variant.train!.pnl > 0 &&
+    variant.validation!.pnl > 0 &&
+    variant.validation!.tradedMarkets >= MIN_VALIDATION_TRADED_MARKETS
+  );
+}
+
+function pickDefaultWinner(variants: Variant[]): { winner: Variant; eligibleCount: number } {
+  const eligible = variants.filter(isDefaultEligible);
+  const pool = eligible.length > 0 ? eligible : variants;
+  const winner = [...pool].sort((a, b) => {
+    const left = a.validation!;
+    const right = b.validation!;
+    const leftRobustPnl = Math.min(a.train!.pnl, left.pnl);
+    const rightRobustPnl = Math.min(b.train!.pnl, right.pnl);
+    if (rightRobustPnl !== leftRobustPnl) return rightRobustPnl - leftRobustPnl;
+    if (right.pnl !== left.pnl) return right.pnl - left.pnl;
+    if (left.maxDrawdown !== right.maxDrawdown) return left.maxDrawdown - right.maxDrawdown;
+    if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
+    return right.trades - left.trades;
+  })[0]!;
+  return { winner, eligibleCount: eligible.length };
 }
 
 function compactResult(result: Result) {
@@ -801,9 +1023,12 @@ async function main() {
   const variants = buildVariants();
 
   for (const variant of variants) {
+    variant.train = summarize(train, variant.config);
     variant.validation = summarize(validation, variant.config);
   }
+  const trainWinner = pickWinnerByPnl(variants, "train");
   const validationWinner = pickWinnerByPnl(variants, "validation");
+  const { winner: defaultWinner, eligibleCount } = pickDefaultWinner(variants);
 
   for (const variant of variants) {
     variant.test = summarize(test, variant.config, { includeTrades: true });
@@ -814,6 +1039,7 @@ async function main() {
     .map((variant) => ({
       name: variant.name,
       profile: variant.profile,
+      trainPnl: variant.train!.pnl,
       ...compactResult(variant.validation!),
     }))
     .sort((a, b) => b.pnl - a.pnl);
@@ -823,9 +1049,19 @@ async function main() {
       name: variant.name,
       profile: variant.profile,
       env: variant.env,
+      trainPnl: variant.train!.pnl,
+      validationPnl: variant.validation!.pnl,
+      validationMaxDrawdown: variant.validation!.maxDrawdown,
+      validationWinRate: variant.validation!.winRate,
       ...compactResult(variant.test!),
     }))
-    .sort((a, b) => b.pnl - a.pnl);
+    .sort((a, b) => {
+      if (b.validationPnl !== a.validationPnl) return b.validationPnl - a.validationPnl;
+      if (a.validationMaxDrawdown !== b.validationMaxDrawdown) {
+        return a.validationMaxDrawdown - b.validationMaxDrawdown;
+      }
+      return b.pnl - a.pnl;
+    });
 
   console.log(
     JSON.stringify(
@@ -843,22 +1079,51 @@ async function main() {
           inferred: markets.filter((market) => market.resolution?.source === "inferred").length,
         },
         variantCount: variants.length,
+        selectionRules: {
+          minValidationTradedMarkets: MIN_VALIDATION_TRADED_MARKETS,
+          requireTrainPnlPositive: true,
+          requireValidationPnlPositive: true,
+          rankBy: "max_min_train_validation_pnl_then_validation_pnl",
+          defaultEligibleCount: eligibleCount,
+        },
         validationTable,
         testTable,
+        trainWinner: {
+          name: trainWinner.name,
+          profile: trainWinner.profile,
+          env: trainWinner.env,
+          train: compactResult(trainWinner.train!),
+          validation: compactResult(trainWinner.validation!),
+          test: compactResult(trainWinner.test!),
+        },
         validationWinner: {
+          selection: "validation_pnl_best_for_default",
           name: validationWinner.name,
           profile: validationWinner.profile,
           env: validationWinner.env,
+          train: compactResult(validationWinner.train!),
           validation: compactResult(validationWinner.validation!),
           test: compactResult(validationWinner.test!),
         },
         winner: {
-          selection: "test_pnl_best_as_requested",
+          selection: eligibleCount > 0
+            ? "robust_train_validation_pnl_best_among_positive_and_high_coverage"
+            : "robust_train_validation_pnl_fallback_no_eligible_candidate",
           note:
-            "Validation was evaluated before test. The request asks to use the test PnL best profile as default, so this is a final-test winner rather than an unbiased holdout estimate.",
+            "The default profile is selected without looking at test results. Test metrics are reported after selection and are not used for choosing the default.",
+          name: defaultWinner.name,
+          profile: defaultWinner.profile,
+          env: defaultWinner.env,
+          train: compactResult(defaultWinner.train!),
+          validation: compactResult(defaultWinner.validation!),
+          test: compactResult(defaultWinner.test!),
+        },
+        testWinner: {
+          selection: "test_pnl_best_report_only",
           name: testWinner.name,
           profile: testWinner.profile,
           env: testWinner.env,
+          train: compactResult(testWinner.train!),
           validation: compactResult(testWinner.validation!),
           test: compactResult(testWinner.test!),
         },

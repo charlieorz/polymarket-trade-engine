@@ -39,6 +39,10 @@ type Config = {
   fullTakeProfitRatio: number;
   halfStopLossRatio: number;
   fullStopLossRatio: number;
+  entryTakeProfitEnabled: boolean;
+  managedTakeProfitEnabled: boolean;
+  stopLossEnabled: boolean;
+  smallProfitExitMode: "cost_cover_hold" | "cost_cover_continue" | "full_exit" | "none";
   dynamicTpPriceWeight: number;
   dynamicTpGapWeight: number;
   dynamicTpMomentumWeight: number;
@@ -134,6 +138,34 @@ function parseOrderTypeEnv(
   return value === "GTC" || value === "FOK" || value === "FAK" ? value : fallback;
 }
 
+function parseBooleanEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const value = env[key];
+  if (value === undefined || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseSmallProfitExitModeEnv(
+  env: Record<string, string | undefined>,
+): Config["smallProfitExitMode"] {
+  const value = env.B5A_SMALL_PROFIT_EXIT_MODE?.trim().toLowerCase();
+  if (
+    value === "cost_cover_hold" ||
+    value === "cost_cover_continue" ||
+    value === "full_exit" ||
+    value === "none"
+  ) {
+    return value;
+  }
+  return "full_exit";
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -156,10 +188,10 @@ export function readBtc5mArbConfig(
     trendLookback: Math.max(3, Math.floor(parseNumberEnv(env, "B5A_TREND_LOOKBACK", 8))),
     shares: Math.max(0.01, parseNumberEnv(env, "B5A_SHARES", 6)),
     entryStartElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_START_SECONDS", 67)),
-    entryEndElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_END_SECONDS", 257)),
+    entryEndElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_END_SECONDS", 217)),
     managedExitStartElapsedSeconds: Math.max(
       0,
-      parseNumberEnv(env, "B5A_MANAGED_EXIT_START_SECONDS", 267),
+      parseNumberEnv(env, "B5A_MANAGED_EXIT_START_SECONDS", 222),
     ),
     holdOnlyStartElapsedSeconds: Math.max(
       0,
@@ -180,8 +212,8 @@ export function readBtc5mArbConfig(
     maxSpread: Math.max(0, parseNumberEnv(env, "B5A_MAX_SPREAD", 0.05)),
     minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_ENTRY_LIQUIDITY_USD", 5)),
     minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_EXIT_LIQUIDITY_USD", 5)),
-    maxAdvantagePrice: clamp(parseNumberEnv(env, "B5A_MAX_ADVANTAGE_PRICE", 0.65), 0.01, 0.99),
-    maxReversalPrice: clamp(parseNumberEnv(env, "B5A_MAX_REVERSAL_PRICE", 0.52), 0.01, 0.99),
+    maxAdvantagePrice: clamp(parseNumberEnv(env, "B5A_MAX_ADVANTAGE_PRICE", 0.58), 0.01, 0.99),
+    maxReversalPrice: clamp(parseNumberEnv(env, "B5A_MAX_REVERSAL_PRICE", 0.51), 0.01, 0.99),
     advantageMinAbsGap: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_ABS_GAP", 4)),
     advantageMinMomentum: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_MOMENTUM", 0.18)),
     advantageMinCumulativeGap: Math.max(
@@ -190,7 +222,7 @@ export function readBtc5mArbConfig(
     ),
     reversalMaxAbsGap: Math.max(0, parseNumberEnv(env, "B5A_REV_MAX_ABS_GAP", 6)),
     reversalMinMomentum: Math.max(0, parseNumberEnv(env, "B5A_REV_MIN_MOMENTUM", 0.18)),
-    minTakeProfitRatio: Math.max(0.12, parseNumberEnv(env, "B5A_MIN_TAKE_PROFIT_RATIO", 0.12)),
+    minTakeProfitRatio: Math.max(0.18, parseNumberEnv(env, "B5A_MIN_TAKE_PROFIT_RATIO", 0.2)),
     maxTakeProfitRatio: Math.max(0.12, parseNumberEnv(env, "B5A_MAX_TAKE_PROFIT_RATIO", 0.48)),
     takeProfitPriceImmediate: clamp(
       parseNumberEnv(env, "B5A_TAKE_PROFIT_PRICE_IMMEDIATE", 0.87),
@@ -200,6 +232,10 @@ export function readBtc5mArbConfig(
     fullTakeProfitRatio: Math.max(0, parseNumberEnv(env, "B5A_FULL_TAKE_PROFIT_RATIO", 0.4)),
     halfStopLossRatio: clamp(parseNumberEnv(env, "B5A_HALF_STOP_LOSS_RATIO", 0.52), 0, 0.99),
     fullStopLossRatio: clamp(parseNumberEnv(env, "B5A_FULL_STOP_LOSS_RATIO", 0.67), 0, 0.99),
+    entryTakeProfitEnabled: parseBooleanEnv(env, "B5A_ENTRY_TAKE_PROFIT_ENABLED", false),
+    managedTakeProfitEnabled: parseBooleanEnv(env, "B5A_MANAGED_TAKE_PROFIT_ENABLED", true),
+    stopLossEnabled: parseBooleanEnv(env, "B5A_STOP_LOSS_ENABLED", false),
+    smallProfitExitMode: parseSmallProfitExitModeEnv(env),
     dynamicTpPriceWeight: Math.max(0, parseNumberEnv(env, "B5A_DYNAMIC_TP_PRICE_WEIGHT", 0.1)),
     dynamicTpGapWeight: Math.max(0, parseNumberEnv(env, "B5A_DYNAMIC_TP_GAP_WEIGHT", 0.08)),
     dynamicTpMomentumWeight: Math.max(
@@ -500,6 +536,7 @@ function chooseExit(params: {
     params.elapsed >= config.entryStartElapsedSeconds &&
     params.elapsed <= config.entryEndElapsedSeconds
   ) {
+    if (!config.entryTakeProfitEnabled) return null;
     if (params.bid >= params.pos.takeProfitPrice) {
       const price = tpPrice(params.pos.takeProfitPrice);
       if (price === null) return null;
@@ -522,55 +559,72 @@ function chooseExit(params: {
     return null;
   }
 
-  if (params.bid >= config.takeProfitPriceImmediate) {
-    const price = tpPrice(config.takeProfitPriceImmediate);
-    if (price === null) return null;
-    return {
-      price,
-      shares: params.pos.shares,
-      orderType: config.takeProfitOrderType,
-      ttlMs: config.takeProfitOrderTtlMs,
-      reason: "managed price take-profit",
-      holdRestAfterFill: false,
-    };
-  }
-
-  if (profitRatio >= config.fullTakeProfitRatio) {
-    const minPrice = params.pos.entryPrice * (1 + config.fullTakeProfitRatio);
-    const price = tpPrice(minPrice);
-    if (price === null) return null;
-    return {
-      price,
-      shares: params.pos.shares,
-      orderType: config.takeProfitOrderType,
-      ttlMs: config.takeProfitOrderTtlMs,
-      reason: "managed full take-profit",
-      holdRestAfterFill: false,
-    };
-  }
-
-  if (profitRatio > 0 && !params.pos.costCovered) {
-    const costCoverShares = roundShares(
-      Math.min(
-        params.pos.shares,
-        (params.pos.entryPrice * params.pos.initialShares) / Math.max(params.bid, EPSILON),
-      ),
-    );
-    if (costCoverShares > EPSILON && costCoverShares < params.pos.shares - EPSILON) {
-      const price = tpPrice(params.pos.entryPrice);
+  if (config.managedTakeProfitEnabled) {
+    if (params.bid >= config.takeProfitPriceImmediate) {
+      const price = tpPrice(config.takeProfitPriceImmediate);
       if (price === null) return null;
       return {
         price,
-        shares: costCoverShares,
+        shares: params.pos.shares,
         orderType: config.takeProfitOrderType,
         ttlMs: config.takeProfitOrderTtlMs,
-        reason: "managed cost-cover take-profit",
-        holdRestAfterFill: true,
+        reason: "managed price take-profit",
+        holdRestAfterFill: false,
       };
+    }
+
+    if (profitRatio >= config.fullTakeProfitRatio) {
+      const minPrice = params.pos.entryPrice * (1 + config.fullTakeProfitRatio);
+      const price = tpPrice(minPrice);
+      if (price === null) return null;
+      return {
+        price,
+        shares: params.pos.shares,
+        orderType: config.takeProfitOrderType,
+        ttlMs: config.takeProfitOrderTtlMs,
+        reason: "managed full take-profit",
+        holdRestAfterFill: false,
+      };
+    }
+
+    if (
+      profitRatio > 0 &&
+      !params.pos.costCovered &&
+      config.smallProfitExitMode !== "none"
+    ) {
+      const costCoverShares = roundShares(
+        Math.min(
+          params.pos.shares,
+          (params.pos.entryPrice * params.pos.initialShares) / Math.max(params.bid, EPSILON),
+        ),
+      );
+      const price = tpPrice(params.pos.entryPrice);
+      if (price === null) return null;
+      if (config.smallProfitExitMode === "full_exit") {
+        return {
+          price,
+          shares: params.pos.shares,
+          orderType: config.takeProfitOrderType,
+          ttlMs: config.takeProfitOrderTtlMs,
+          reason: "managed small-profit full-exit",
+          holdRestAfterFill: false,
+        };
+      }
+      if (costCoverShares > EPSILON && costCoverShares < params.pos.shares - EPSILON) {
+        return {
+          price,
+          shares: costCoverShares,
+          orderType: config.takeProfitOrderType,
+          ttlMs: config.takeProfitOrderTtlMs,
+          reason: "managed cost-cover take-profit",
+          holdRestAfterFill: config.smallProfitExitMode === "cost_cover_hold",
+        };
+      }
     }
   }
 
   if (profitRatio >= 0) return null;
+  if (!config.stopLossEnabled) return null;
   if (sideCurrentGap > 0) return null;
 
   const lossRatio = -profitRatio;

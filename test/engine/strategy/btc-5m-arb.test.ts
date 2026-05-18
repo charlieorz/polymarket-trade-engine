@@ -82,18 +82,22 @@ describe("btc-5m-arb", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({});
     expect(config.shares).toBe(6);
     expect(config.entryStartElapsedSeconds).toBe(67);
-    expect(config.entryEndElapsedSeconds).toBe(257);
-    expect(config.managedExitStartElapsedSeconds).toBe(267);
+    expect(config.entryEndElapsedSeconds).toBe(217);
+    expect(config.managedExitStartElapsedSeconds).toBe(222);
     expect(config.holdOnlyStartElapsedSeconds).toBe(297);
     expect(config.entryOrderType).toBe("GTC");
     expect(config.takeProfitOrderType).toBe("GTC");
     expect(config.stopLossOrderType).toBe("FAK");
-    expect(config.maxAdvantagePrice).toBe(0.65);
-    expect(config.maxReversalPrice).toBe(0.52);
-    expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.12);
+    expect(config.maxAdvantagePrice).toBe(0.58);
+    expect(config.maxReversalPrice).toBe(0.51);
+    expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.18);
+    expect(config.entryTakeProfitEnabled).toBe(false);
+    expect(config.managedTakeProfitEnabled).toBe(true);
+    expect(config.stopLossEnabled).toBe(false);
+    expect(config.smallProfitExitMode).toBe("full_exit");
   });
 
-  test("chooses an advantage entry only inside the 67-257 second window", () => {
+  test("chooses an advantage entry only inside the 67-217 second window", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({
       B5A_ADV_MIN_ABS_GAP: "4",
       B5A_ADV_MIN_MOMENTUM: "0.2",
@@ -126,7 +130,7 @@ describe("btc-5m-arb", () => {
       __btc5mArbTestHooks.chooseEntry({
         ctx: mockCtx(),
         gap: 10,
-        elapsed: 258,
+        elapsed: 218,
         stats: advantageStats(),
         state: baseState(),
         config,
@@ -148,7 +152,7 @@ describe("btc-5m-arb", () => {
     });
     expect(entry?.kind).toBe("reversal");
     expect(entry?.side).toBe("DOWN");
-    expect(entry?.price).toBeLessThanOrEqual(0.52);
+    expect(entry?.price).toBeLessThanOrEqual(0.51);
   });
 
   test("does not submit a second entry after any entry order has been submitted", () => {
@@ -162,7 +166,7 @@ describe("btc-5m-arb", () => {
     expect(entry).toBeNull();
   });
 
-  test("uses dynamic take-profit with a minimum 12 percent ratio", () => {
+  test("uses dynamic take-profit with a higher minimum entry-window ratio", () => {
     const ratio = __btc5mArbTestHooks.dynamicTakeProfitRatio({
       kind: "advantage",
       price: 0.64,
@@ -171,7 +175,7 @@ describe("btc-5m-arb", () => {
       maxPrice: 0.65,
       config: __btc5mArbTestHooks.readBtc5mArbConfig({}),
     });
-    expect(ratio).toBeGreaterThanOrEqual(0.12);
+    expect(ratio).toBeGreaterThanOrEqual(0.18);
   });
 
   test("takes profit but never stops loss in the entry window", () => {
@@ -183,6 +187,9 @@ describe("btc-5m-arb", () => {
       bid: 0.68,
       bidLiquidity: 20,
       elapsed: 180,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_ENTRY_TAKE_PROFIT_ENABLED: "true",
+      }),
     });
     expect(tp?.reason).toBe("dynamic take-profit");
     expect(tp?.orderType).toBe("GTC");
@@ -199,7 +206,7 @@ describe("btc-5m-arb", () => {
     expect(stop).toBeNull();
   });
 
-  test("applies managed take-profit priority in the 267-297 second window", () => {
+  test("applies managed take-profit priority in the 222-297 second window", () => {
     const priceTp = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.88, upAsk: 0.9 }),
       pos: { ...basePosition },
@@ -207,7 +214,7 @@ describe("btc-5m-arb", () => {
       ask: 0.9,
       bid: 0.88,
       bidLiquidity: 20,
-      elapsed: 270,
+      elapsed: 230,
     });
     expect(priceTp?.reason).toBe("managed price take-profit");
     expect(priceTp?.shares).toBe(6);
@@ -219,7 +226,7 @@ describe("btc-5m-arb", () => {
       ask: 0.82,
       bid: 0.8,
       bidLiquidity: 20,
-      elapsed: 270,
+      elapsed: 230,
     });
     expect(fullTp?.reason).toBe("managed full take-profit");
     expect(fullTp?.shares).toBe(6);
@@ -231,11 +238,27 @@ describe("btc-5m-arb", () => {
       ask: 0.64,
       bid: 0.62,
       bidLiquidity: 20,
-      elapsed: 270,
+      elapsed: 230,
     });
-    expect(costCover?.reason).toBe("managed cost-cover take-profit");
-    expect(costCover?.shares).toBeLessThan(6);
-    expect(costCover?.holdRestAfterFill).toBe(true);
+    expect(costCover?.reason).toBe("managed small-profit full-exit");
+    expect(costCover?.shares).toBe(6);
+    expect(costCover?.holdRestAfterFill).toBe(false);
+
+    const legacyCostCover = __btc5mArbTestHooks.chooseExit({
+      ctx: mockCtx({ upBid: 0.62, upAsk: 0.64 }),
+      pos: { ...basePosition },
+      gap: 10,
+      ask: 0.64,
+      bid: 0.62,
+      bidLiquidity: 20,
+      elapsed: 230,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_SMALL_PROFIT_EXIT_MODE: "cost_cover_hold",
+      }),
+    });
+    expect(legacyCostCover?.reason).toBe("managed cost-cover take-profit");
+    expect(legacyCostCover?.shares).toBeLessThan(6);
+    expect(legacyCostCover?.holdRestAfterFill).toBe(true);
   });
 
   test("skips stop-loss when gap still agrees with the held side", () => {
@@ -246,7 +269,10 @@ describe("btc-5m-arb", () => {
       ask: 0.22,
       bid: 0.2,
       bidLiquidity: 20,
-      elapsed: 270,
+      elapsed: 230,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_STOP_LOSS_ENABLED: "true",
+      }),
     });
     expect(exit).toBeNull();
   });
@@ -259,7 +285,10 @@ describe("btc-5m-arb", () => {
       ask: 0.29,
       bid: 0.27,
       bidLiquidity: 20,
-      elapsed: 270,
+      elapsed: 230,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_STOP_LOSS_ENABLED: "true",
+      }),
     });
     expect(half?.reason).toBe("managed half stop-loss");
     expect(half?.orderType).toBe("FAK");
@@ -273,7 +302,10 @@ describe("btc-5m-arb", () => {
       ask: 0.2,
       bid: 0.18,
       bidLiquidity: 20,
-      elapsed: 270,
+      elapsed: 230,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_STOP_LOSS_ENABLED: "true",
+      }),
     });
     expect(full?.reason).toBe("managed full stop-loss");
     expect(full?.orderType).toBe("FAK");
