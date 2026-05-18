@@ -95,6 +95,7 @@ describe("btc-5m-arb", () => {
     expect(config.managedTakeProfitEnabled).toBe(true);
     expect(config.stopLossEnabled).toBe(false);
     expect(config.smallProfitExitMode).toBe("full_exit");
+    expect(config.halfStopHoldRestToSettlement).toBe(false);
   });
 
   test("chooses an advantage entry only inside the 67-217 second window", () => {
@@ -178,7 +179,7 @@ describe("btc-5m-arb", () => {
     expect(ratio).toBeGreaterThanOrEqual(0.18);
   });
 
-  test("takes profit but never stops loss in the entry window", () => {
+  test("takes entry-window take-profit and allows enabled entry-window stop-loss", () => {
     const tp = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.68, upAsk: 0.69 }),
       pos: { ...basePosition },
@@ -194,7 +195,7 @@ describe("btc-5m-arb", () => {
     expect(tp?.reason).toBe("dynamic take-profit");
     expect(tp?.orderType).toBe("GTC");
 
-    const stop = __btc5mArbTestHooks.chooseExit({
+    const disabledStop = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.2, upAsk: 0.22 }),
       pos: { ...basePosition },
       gap: -20,
@@ -203,7 +204,21 @@ describe("btc-5m-arb", () => {
       bidLiquidity: 20,
       elapsed: 180,
     });
-    expect(stop).toBeNull();
+    expect(disabledStop).toBeNull();
+
+    const enabledStop = __btc5mArbTestHooks.chooseExit({
+      ctx: mockCtx({ upBid: 0.2, upAsk: 0.22 }),
+      pos: { ...basePosition },
+      gap: -20,
+      ask: 0.22,
+      bid: 0.2,
+      bidLiquidity: 20,
+      elapsed: 180,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_STOP_LOSS_ENABLED: "true",
+      }),
+    });
+    expect(enabledStop?.reason).toBe("managed half stop-loss");
   });
 
   test("applies managed take-profit priority in the 222-297 second window", () => {
@@ -293,7 +308,23 @@ describe("btc-5m-arb", () => {
     expect(half?.reason).toBe("managed half stop-loss");
     expect(half?.orderType).toBe("FAK");
     expect(half?.shares).toBe(3);
-    expect(half?.holdRestAfterFill).toBe(true);
+    expect(half?.holdRestAfterFill).toBe(false);
+
+    const legacyHalf = __btc5mArbTestHooks.chooseExit({
+      ctx: mockCtx({ upBid: 0.27, upAsk: 0.29 }),
+      pos: { ...basePosition },
+      gap: -12,
+      ask: 0.29,
+      bid: 0.27,
+      bidLiquidity: 20,
+      elapsed: 230,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_STOP_LOSS_ENABLED: "true",
+        B5A_HALF_STOP_HOLD_REST_TO_SETTLEMENT: "true",
+      }),
+    });
+    expect(legacyHalf?.reason).toBe("managed half stop-loss");
+    expect(legacyHalf?.holdRestAfterFill).toBe(true);
 
     const full = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.18, upAsk: 0.2 }),

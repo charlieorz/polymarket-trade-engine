@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { __btc5mArbTestHooks } from "../engine/strategy/btc-5m-arb.ts";
 
@@ -65,6 +65,10 @@ type Result = {
   winRate: number;
   avgPnlPerMarket: number;
   avgPnlPerTrade: number;
+  avgWin: number;
+  avgLoss: number;
+  grossProfit: number;
+  grossLoss: number;
   maxDrawdown: number;
   advantageTrades: number;
   reversalTrades: number;
@@ -123,11 +127,12 @@ type PendingSell = {
 };
 
 const LOG_DIR = process.env.B5A_BACKTEST_LOG_DIR ?? "logs";
-const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-18-smallfull-v1";
+const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-18-low-risk-v1";
 const MIN_VALIDATION_TRADED_MARKETS = Math.max(
   1,
-  Number(process.env.B5A_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 35),
+  Number(process.env.B5A_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 20),
 );
+const REPORT_DIR = process.env.B5A_BACKTEST_REPORT_DIR ?? "reports/backtests";
 const EPSILON = 1e-9;
 
 function round(value: number, digits = 4): number {
@@ -563,10 +568,16 @@ function summarize(
     trades.push(...result.trades);
   }
 
-  const wins = trades.filter((trade) => trade.pnl > 0).length;
+  const winningTrades = trades.filter((trade) => trade.pnl > 0);
+  const losingTrades = trades.filter((trade) => trade.pnl < 0);
+  const wins = winningTrades.length;
   const winRate = trades.length > 0 ? wins / trades.length : 0;
   const avgPnlPerMarket = markets.length > 0 ? pnl / markets.length : 0;
   const avgPnlPerTrade = trades.length > 0 ? pnl / trades.length : 0;
+  const grossProfit = winningTrades.reduce((sum, trade) => sum + trade.pnl, 0);
+  const grossLoss = losingTrades.reduce((sum, trade) => sum + trade.pnl, 0);
+  const avgWin = winningTrades.length > 0 ? grossProfit / winningTrades.length : 0;
+  const avgLoss = losingTrades.length > 0 ? grossLoss / losingTrades.length : 0;
   const coverage = markets.length > 0 ? tradedMarkets / markets.length : 0;
   const underTradePenalty =
     tradedMarkets < Math.max(3, Math.floor(markets.length * 0.03))
@@ -590,6 +601,10 @@ function summarize(
     winRate: round(winRate),
     avgPnlPerMarket: round(avgPnlPerMarket),
     avgPnlPerTrade: round(avgPnlPerTrade),
+    avgWin: round(avgWin),
+    avgLoss: round(avgLoss),
+    grossProfit: round(grossProfit),
+    grossLoss: round(grossLoss),
     maxDrawdown: round(maxDrawdown),
     advantageTrades: trades.filter((trade) => trade.kind === "advantage").length,
     reversalTrades: trades.filter((trade) => trade.kind === "reversal").length,
@@ -617,6 +632,11 @@ function buildVariants(): Variant[] {
     B5A_ENTRY_ORDER_TYPE: "GTC",
     B5A_TAKE_PROFIT_ORDER_TYPE: "GTC",
     B5A_STOP_LOSS_ORDER_TYPE: "FAK",
+    B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
+    B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
+    B5A_STOP_LOSS_ENABLED: "true",
+    B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+    B5A_HALF_STOP_HOLD_REST_TO_SETTLEMENT: "false",
   };
 
   const entryProfiles: Array<{
@@ -625,87 +645,87 @@ function buildVariants(): Variant[] {
     env: Record<string, string>;
   }> = [
     {
-      name: "conservative_a",
+      name: "reversal_only_low",
       profile: "conservative",
       env: {
-        B5A_MAX_SPREAD: "0.03",
+        B5A_MAX_SPREAD: "0.04",
         B5A_MIN_ENTRY_LIQUIDITY_USD: "8",
         B5A_MIN_EXIT_LIQUIDITY_USD: "8",
-        B5A_ADV_MIN_ABS_GAP: "6",
-        B5A_ADV_MIN_MOMENTUM: "0.35",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "80",
-        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_ADV_MIN_ABS_GAP: "999",
+        B5A_ADV_MIN_MOMENTUM: "999",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "999",
+        B5A_MAX_ADVANTAGE_PRICE: "0.45",
         B5A_MAX_REVERSAL_PRICE: "0.49",
         B5A_REV_MAX_ABS_GAP: "3",
         B5A_REV_MIN_MOMENTUM: "0.35",
       },
     },
     {
-      name: "balanced_a",
+      name: "ultra_low",
       profile: "conservative",
       env: {
         B5A_MAX_SPREAD: "0.045",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "6",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "6",
-        B5A_ADV_MIN_ABS_GAP: "4",
-        B5A_ADV_MIN_MOMENTUM: "0.2",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "22",
-        B5A_MAX_ADVANTAGE_PRICE: "0.56",
-        B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "5",
-        B5A_REV_MIN_MOMENTUM: "0.18",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "8",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "8",
+        B5A_ADV_MIN_ABS_GAP: "5",
+        B5A_ADV_MIN_MOMENTUM: "0.3",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "60",
+        B5A_MAX_ADVANTAGE_PRICE: "0.5",
+        B5A_MAX_REVERSAL_PRICE: "0.49",
+        B5A_REV_MAX_ABS_GAP: "4",
+        B5A_REV_MIN_MOMENTUM: "0.3",
       },
     },
     {
-      name: "balanced_b",
+      name: "low_a",
       profile: "conservative",
       env: {
         B5A_MAX_SPREAD: "0.05",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "3.5",
-        B5A_ADV_MIN_MOMENTUM: "0.18",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "16",
-        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "6",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "6",
+        B5A_ADV_MIN_ABS_GAP: "4.5",
+        B5A_ADV_MIN_MOMENTUM: "0.26",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "45",
+        B5A_MAX_ADVANTAGE_PRICE: "0.5",
         B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "5.5",
-        B5A_REV_MIN_MOMENTUM: "0.16",
+        B5A_REV_MAX_ABS_GAP: "4.5",
+        B5A_REV_MIN_MOMENTUM: "0.26",
       },
     },
     {
-      name: "balanced_c",
+      name: "low_b",
+      profile: "conservative",
+      env: {
+        B5A_MAX_SPREAD: "0.055",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5A_ADV_MIN_ABS_GAP: "4",
+        B5A_ADV_MIN_MOMENTUM: "0.22",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "30",
+        B5A_MAX_ADVANTAGE_PRICE: "0.5",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "5",
+        B5A_REV_MIN_MOMENTUM: "0.22",
+      },
+    },
+    {
+      name: "low_c",
       profile: "aggressive",
       env: {
         B5A_MAX_SPREAD: "0.055",
         B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
         B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "3",
-        B5A_ADV_MIN_MOMENTUM: "0.16",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "12",
-        B5A_MAX_ADVANTAGE_PRICE: "0.56",
-        B5A_MAX_REVERSAL_PRICE: "0.51",
-        B5A_REV_MAX_ABS_GAP: "6",
-        B5A_REV_MIN_MOMENTUM: "0.14",
+        B5A_ADV_MIN_ABS_GAP: "3.5",
+        B5A_ADV_MIN_MOMENTUM: "0.2",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "24",
+        B5A_MAX_ADVANTAGE_PRICE: "0.51",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "5.5",
+        B5A_REV_MIN_MOMENTUM: "0.2",
       },
     },
     {
-      name: "balanced_d",
-      profile: "aggressive",
-      env: {
-        B5A_MAX_SPREAD: "0.06",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
-        B5A_ADV_MIN_ABS_GAP: "3",
-        B5A_ADV_MIN_MOMENTUM: "0.14",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "10",
-        B5A_MAX_ADVANTAGE_PRICE: "0.56",
-        B5A_MAX_REVERSAL_PRICE: "0.51",
-        B5A_REV_MAX_ABS_GAP: "6.5",
-        B5A_REV_MIN_MOMENTUM: "0.12",
-      },
-    },
-    {
-      name: "conservative_b",
+      name: "legacy_a_reference",
       profile: "conservative",
       env: {
         B5A_MAX_SPREAD: "0.04",
@@ -718,38 +738,6 @@ function buildVariants(): Variant[] {
         B5A_MAX_REVERSAL_PRICE: "0.5",
         B5A_REV_MAX_ABS_GAP: "4",
         B5A_REV_MIN_MOMENTUM: "0.28",
-      },
-    },
-    {
-      name: "conservative_c",
-      profile: "conservative",
-      env: {
-        B5A_MAX_SPREAD: "0.045",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "6",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "6",
-        B5A_ADV_MIN_ABS_GAP: "4.5",
-        B5A_ADV_MIN_MOMENTUM: "0.24",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "40",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "4.5",
-        B5A_REV_MIN_MOMENTUM: "0.24",
-      },
-    },
-    {
-      name: "conservative_d",
-      profile: "conservative",
-      env: {
-        B5A_MAX_SPREAD: "0.05",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "4",
-        B5A_ADV_MIN_MOMENTUM: "0.22",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "30",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "5",
-        B5A_REV_MIN_MOMENTUM: "0.22",
       },
     },
     {
@@ -820,12 +808,9 @@ function buildVariants(): Variant[] {
 
   const exitProfiles: Array<{ name: string; env: Record<string, string> }> = [
     {
-      name: "small_full_stop15_35",
+      name: "early160_stop15_35",
       env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_MANAGED_EXIT_START_SECONDS: "160",
         B5A_HALF_STOP_LOSS_RATIO: "0.15",
         B5A_FULL_STOP_LOSS_RATIO: "0.35",
         B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
@@ -833,25 +818,9 @@ function buildVariants(): Variant[] {
       },
     },
     {
-      name: "small_full_stop15_40",
+      name: "early180_stop20_40",
       env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
-        B5A_HALF_STOP_LOSS_RATIO: "0.15",
-        B5A_FULL_STOP_LOSS_RATIO: "0.4",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.85",
-      },
-    },
-    {
-      name: "small_full_stop20_40",
-      env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_MANAGED_EXIT_START_SECONDS: "180",
         B5A_HALF_STOP_LOSS_RATIO: "0.2",
         B5A_FULL_STOP_LOSS_RATIO: "0.4",
         B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
@@ -859,64 +828,29 @@ function buildVariants(): Variant[] {
       },
     },
     {
-      name: "small_full_stop20_45",
+      name: "early180_stop30_40",
       env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
-        B5A_HALF_STOP_LOSS_RATIO: "0.2",
-        B5A_FULL_STOP_LOSS_RATIO: "0.45",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
-      },
-    },
-    {
-      name: "small_full_stop25_45",
-      env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
-        B5A_HALF_STOP_LOSS_RATIO: "0.25",
-        B5A_FULL_STOP_LOSS_RATIO: "0.45",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
-      },
-    },
-    {
-      name: "small_full_stop25_50",
-      env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
-        B5A_HALF_STOP_LOSS_RATIO: "0.25",
-        B5A_FULL_STOP_LOSS_RATIO: "0.5",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.45",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
-      },
-    },
-    {
-      name: "small_full_stop30_50",
-      env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_MANAGED_EXIT_START_SECONDS: "180",
         B5A_HALF_STOP_LOSS_RATIO: "0.3",
-        B5A_FULL_STOP_LOSS_RATIO: "0.5",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.45",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.9",
+        B5A_FULL_STOP_LOSS_RATIO: "0.4",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
       },
     },
     {
-      name: "small_full_stop35_55",
+      name: "early200_stop30_45",
       env: {
-        B5A_ENTRY_TAKE_PROFIT_ENABLED: "false",
-        B5A_MANAGED_TAKE_PROFIT_ENABLED: "true",
-        B5A_STOP_LOSS_ENABLED: "true",
-        B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
+        B5A_MANAGED_EXIT_START_SECONDS: "200",
+        B5A_HALF_STOP_LOSS_RATIO: "0.3",
+        B5A_FULL_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.45",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
+      },
+    },
+    {
+      name: "baseline222_stop35_55",
+      env: {
+        B5A_MANAGED_EXIT_START_SECONDS: "222",
         B5A_HALF_STOP_LOSS_RATIO: "0.35",
         B5A_FULL_STOP_LOSS_RATIO: "0.55",
         B5A_FULL_TAKE_PROFIT_RATIO: "0.5",
@@ -925,18 +859,27 @@ function buildVariants(): Variant[] {
     },
   ];
 
+  const shareProfiles = [
+    { name: "shares3", env: { B5A_SHARES: "3" } },
+    { name: "shares4", env: { B5A_SHARES: "4" } },
+    { name: "shares6", env: { B5A_SHARES: "6" } },
+  ];
+
   const specs: Array<{ name: string; profile: Profile; env: Record<string, string> }> = [];
   for (const entryProfile of entryProfiles) {
     for (const exitProfile of exitProfiles) {
-      specs.push({
-        name: `${entryProfile.name}_${exitProfile.name}`,
-        profile: entryProfile.profile,
-        env: {
-          ...baseEnv,
-          ...entryProfile.env,
-          ...exitProfile.env,
-        },
-      });
+      for (const shareProfile of shareProfiles) {
+        specs.push({
+          name: `${entryProfile.name}_${exitProfile.name}_${shareProfile.name}`,
+          profile: entryProfile.profile,
+          env: {
+            ...baseEnv,
+            ...entryProfile.env,
+            ...exitProfile.env,
+            ...shareProfile.env,
+          },
+        });
+      }
     }
   }
 
@@ -974,21 +917,56 @@ function isDefaultEligible(variant: Variant): boolean {
   );
 }
 
-function pickDefaultWinner(variants: Variant[]): { winner: Variant; eligibleCount: number } {
+function pickDefaultWinner(variants: Variant[]): {
+  winner: Variant;
+  eligibleCount: number;
+  selection: string;
+} {
   const eligible = variants.filter(isDefaultEligible);
-  const pool = eligible.length > 0 ? eligible : variants;
+  if (eligible.length > 0) {
+    const winner = [...eligible].sort((a, b) => {
+      const left = a.validation!;
+      const right = b.validation!;
+      const leftRobustPnl = Math.min(a.train!.pnl, left.pnl);
+      const rightRobustPnl = Math.min(b.train!.pnl, right.pnl);
+      if (rightRobustPnl !== leftRobustPnl) return rightRobustPnl - leftRobustPnl;
+      if (right.pnl !== left.pnl) return right.pnl - left.pnl;
+      if (left.maxDrawdown !== right.maxDrawdown) return left.maxDrawdown - right.maxDrawdown;
+      if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
+      return right.trades - left.trades;
+    })[0]!;
+    return {
+      winner,
+      eligibleCount: eligible.length,
+      selection: "robust_train_validation_pnl_best_among_positive_and_min_coverage",
+    };
+  }
+
+  const lowRiskValidationPositive = variants.filter(
+    (variant) =>
+      variant.profile === "conservative" &&
+      variant.config.shares <= 3 &&
+      variant.validation!.pnl > 0 &&
+      variant.validation!.tradedMarkets >= Math.min(15, MIN_VALIDATION_TRADED_MARKETS),
+  );
+  const pool = lowRiskValidationPositive.length > 0 ? lowRiskValidationPositive : variants;
   const winner = [...pool].sort((a, b) => {
     const left = a.validation!;
     const right = b.validation!;
-    const leftRobustPnl = Math.min(a.train!.pnl, left.pnl);
-    const rightRobustPnl = Math.min(b.train!.pnl, right.pnl);
-    if (rightRobustPnl !== leftRobustPnl) return rightRobustPnl - leftRobustPnl;
-    if (right.pnl !== left.pnl) return right.pnl - left.pnl;
+    if (right.score !== left.score) return right.score - left.score;
+    if (a.config.shares !== b.config.shares) return a.config.shares - b.config.shares;
     if (left.maxDrawdown !== right.maxDrawdown) return left.maxDrawdown - right.maxDrawdown;
     if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
     return right.trades - left.trades;
   })[0]!;
-  return { winner, eligibleCount: eligible.length };
+  return {
+    winner,
+    eligibleCount: eligible.length,
+    selection:
+      lowRiskValidationPositive.length > 0
+        ? "fallback_low_risk_validation_positive_no_eligible_train_validation_candidate"
+        : "fallback_no_eligible_train_validation_candidate",
+  };
 }
 
 function compactResult(result: Result) {
@@ -1002,6 +980,10 @@ function compactResult(result: Result) {
     maxDrawdown: result.maxDrawdown,
     winRate: result.winRate,
     avgPnlPerTrade: result.avgPnlPerTrade,
+    avgWin: result.avgWin,
+    avgLoss: result.avgLoss,
+    grossProfit: result.grossProfit,
+    grossLoss: result.grossLoss,
     settlementHeld: result.settlementHeld,
     expiredEntries: result.expiredEntries,
     expiredSells: result.expiredSells,
@@ -1028,7 +1010,11 @@ async function main() {
   }
   const trainWinner = pickWinnerByPnl(variants, "train");
   const validationWinner = pickWinnerByPnl(variants, "validation");
-  const { winner: defaultWinner, eligibleCount } = pickDefaultWinner(variants);
+  const {
+    winner: defaultWinner,
+    eligibleCount,
+    selection: defaultSelection,
+  } = pickDefaultWinner(variants);
 
   for (const variant of variants) {
     variant.test = summarize(test, variant.config, { includeTrades: true });
@@ -1063,69 +1049,138 @@ async function main() {
       return b.pnl - a.pnl;
     });
 
+  const output = {
+    logDir: LOG_DIR,
+    splitSeed: SPLIT_SEED,
+    scannedMarkets: markets.length,
+    split: {
+      train: train.length,
+      validation: validation.length,
+      test: test.length,
+    },
+    resolution: {
+      explicit: markets.filter((market) => market.resolution?.source === "explicit").length,
+      inferred: markets.filter((market) => market.resolution?.source === "inferred").length,
+    },
+    variantCount: variants.length,
+    selectionRules: {
+      minValidationTradedMarkets: MIN_VALIDATION_TRADED_MARKETS,
+      requireTrainPnlPositive: true,
+      requireValidationPnlPositive: true,
+      rankBy:
+        "max_min_train_validation_pnl_then_validation_pnl; fallback=min_share_conservative_validation_positive_score",
+      defaultEligibleCount: eligibleCount,
+    },
+    validationTable,
+    testTable,
+    trainWinner: {
+      name: trainWinner.name,
+      profile: trainWinner.profile,
+      env: trainWinner.env,
+      train: compactResult(trainWinner.train!),
+      validation: compactResult(trainWinner.validation!),
+      test: compactResult(trainWinner.test!),
+    },
+    validationWinner: {
+      selection: "validation_pnl_best_report_only",
+      name: validationWinner.name,
+      profile: validationWinner.profile,
+      env: validationWinner.env,
+      train: compactResult(validationWinner.train!),
+      validation: compactResult(validationWinner.validation!),
+      test: compactResult(validationWinner.test!),
+    },
+    winner: {
+      selection: defaultSelection,
+      note:
+        "The default profile is selected without looking at test results. Test metrics are reported after selection and are not used for choosing the default.",
+      name: defaultWinner.name,
+      profile: defaultWinner.profile,
+      env: defaultWinner.env,
+      train: compactResult(defaultWinner.train!),
+      validation: compactResult(defaultWinner.validation!),
+      test: compactResult(defaultWinner.test!),
+      testTrades: defaultWinner.test!.tradesDetail,
+    },
+    testWinner: {
+      selection: "test_pnl_best_report_only",
+      name: testWinner.name,
+      profile: testWinner.profile,
+      env: testWinner.env,
+      train: compactResult(testWinner.train!),
+      validation: compactResult(testWinner.validation!),
+      test: compactResult(testWinner.test!),
+      testTrades: testWinner.test!.tradesDetail,
+    },
+  };
+
+  await mkdir(REPORT_DIR, { recursive: true });
+  const reportBase = join(REPORT_DIR, `btc-5m-arb-${SPLIT_SEED}`);
+  await Bun.write(`${reportBase}.json`, JSON.stringify(output, null, 2));
+
+  const csvHeader = [
+    "name",
+    "profile",
+    "trainPnl",
+    "validationPnl",
+    "validationMaxDrawdown",
+    "validationWinRate",
+    "testPnl",
+    "testMaxDrawdown",
+    "testWinRate",
+    "testTrades",
+    "testTradedMarkets",
+    "testAvgPnlPerTrade",
+    "testGrossProfit",
+    "testGrossLoss",
+    "env",
+  ];
+  const csvRows = testTable.map((row) =>
+    [
+      row.name,
+      row.profile,
+      row.trainPnl,
+      row.validationPnl,
+      row.validationMaxDrawdown,
+      row.validationWinRate,
+      row.pnl,
+      row.maxDrawdown,
+      row.winRate,
+      row.trades,
+      row.tradedMarkets,
+      row.avgPnlPerTrade,
+      row.grossProfit,
+      row.grossLoss,
+      JSON.stringify(row.env),
+    ]
+      .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+      .join(","),
+  );
+  await Bun.write(
+    `${reportBase}-valid-test-table.csv`,
+    [csvHeader.join(","), ...csvRows].join("\n"),
+  );
+
   console.log(
     JSON.stringify(
       {
-        logDir: LOG_DIR,
-        splitSeed: SPLIT_SEED,
-        scannedMarkets: markets.length,
-        split: {
-          train: train.length,
-          validation: validation.length,
-          test: test.length,
-        },
-        resolution: {
-          explicit: markets.filter((market) => market.resolution?.source === "explicit").length,
-          inferred: markets.filter((market) => market.resolution?.source === "inferred").length,
-        },
-        variantCount: variants.length,
-        selectionRules: {
-          minValidationTradedMarkets: MIN_VALIDATION_TRADED_MARKETS,
-          requireTrainPnlPositive: true,
-          requireValidationPnlPositive: true,
-          rankBy: "max_min_train_validation_pnl_then_validation_pnl",
-          defaultEligibleCount: eligibleCount,
-        },
-        validationTable,
-        testTable,
-        trainWinner: {
-          name: trainWinner.name,
-          profile: trainWinner.profile,
-          env: trainWinner.env,
-          train: compactResult(trainWinner.train!),
-          validation: compactResult(trainWinner.validation!),
-          test: compactResult(trainWinner.test!),
-        },
-        validationWinner: {
-          selection: "validation_pnl_best_for_default",
-          name: validationWinner.name,
-          profile: validationWinner.profile,
-          env: validationWinner.env,
-          train: compactResult(validationWinner.train!),
-          validation: compactResult(validationWinner.validation!),
-          test: compactResult(validationWinner.test!),
-        },
-        winner: {
-          selection: eligibleCount > 0
-            ? "robust_train_validation_pnl_best_among_positive_and_high_coverage"
-            : "robust_train_validation_pnl_fallback_no_eligible_candidate",
-          note:
-            "The default profile is selected without looking at test results. Test metrics are reported after selection and are not used for choosing the default.",
-          name: defaultWinner.name,
-          profile: defaultWinner.profile,
-          env: defaultWinner.env,
-          train: compactResult(defaultWinner.train!),
-          validation: compactResult(defaultWinner.validation!),
-          test: compactResult(defaultWinner.test!),
-        },
+        logDir: output.logDir,
+        splitSeed: output.splitSeed,
+        scannedMarkets: output.scannedMarkets,
+        split: output.split,
+        resolution: output.resolution,
+        variantCount: output.variantCount,
+        selectionRules: output.selectionRules,
+        topValidation: validationTable.slice(0, 12),
+        topTestByValidationRanking: testTable.slice(0, 12),
+        winner: output.winner,
         testWinner: {
-          selection: "test_pnl_best_report_only",
-          name: testWinner.name,
-          profile: testWinner.profile,
-          env: testWinner.env,
-          train: compactResult(testWinner.train!),
-          validation: compactResult(testWinner.validation!),
-          test: compactResult(testWinner.test!),
+          ...output.testWinner,
+          testTrades: output.testWinner.testTrades?.slice(0, 20) ?? [],
+        },
+        reportFiles: {
+          json: `${reportBase}.json`,
+          csv: `${reportBase}-valid-test-table.csv`,
         },
       },
       null,

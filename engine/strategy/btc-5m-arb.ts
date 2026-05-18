@@ -43,6 +43,7 @@ type Config = {
   managedTakeProfitEnabled: boolean;
   stopLossEnabled: boolean;
   smallProfitExitMode: "cost_cover_hold" | "cost_cover_continue" | "full_exit" | "none";
+  halfStopHoldRestToSettlement: boolean;
   dynamicTpPriceWeight: number;
   dynamicTpGapWeight: number;
   dynamicTpMomentumWeight: number;
@@ -236,6 +237,11 @@ export function readBtc5mArbConfig(
     managedTakeProfitEnabled: parseBooleanEnv(env, "B5A_MANAGED_TAKE_PROFIT_ENABLED", true),
     stopLossEnabled: parseBooleanEnv(env, "B5A_STOP_LOSS_ENABLED", false),
     smallProfitExitMode: parseSmallProfitExitModeEnv(env),
+    halfStopHoldRestToSettlement: parseBooleanEnv(
+      env,
+      "B5A_HALF_STOP_HOLD_REST_TO_SETTLEMENT",
+      false,
+    ),
     dynamicTpPriceWeight: Math.max(0, parseNumberEnv(env, "B5A_DYNAMIC_TP_PRICE_WEIGHT", 0.1)),
     dynamicTpGapWeight: Math.max(0, parseNumberEnv(env, "B5A_DYNAMIC_TP_GAP_WEIGHT", 0.08)),
     dynamicTpMomentumWeight: Math.max(
@@ -536,8 +542,7 @@ function chooseExit(params: {
     params.elapsed >= config.entryStartElapsedSeconds &&
     params.elapsed <= config.entryEndElapsedSeconds
   ) {
-    if (!config.entryTakeProfitEnabled) return null;
-    if (params.bid >= params.pos.takeProfitPrice) {
+    if (config.entryTakeProfitEnabled && params.bid >= params.pos.takeProfitPrice) {
       const price = tpPrice(params.pos.takeProfitPrice);
       if (price === null) return null;
       return {
@@ -549,7 +554,31 @@ function chooseExit(params: {
         holdRestAfterFill: false,
       };
     }
-    return null;
+  }
+
+  if (profitRatio < 0 && config.stopLossEnabled && sideCurrentGap <= 0) {
+    const lossRatio = -profitRatio;
+    if (lossRatio >= config.fullStopLossRatio) {
+      return {
+        price: roundPrice(params.bid),
+        shares: params.pos.shares,
+        orderType: config.stopLossOrderType,
+        ttlMs: config.stopLossOrderTtlMs,
+        reason: "managed full stop-loss",
+        holdRestAfterFill: false,
+      };
+    }
+
+    if (lossRatio >= config.halfStopLossRatio && !params.pos.halfStopped) {
+      return {
+        price: roundPrice(params.bid),
+        shares: roundShares(params.pos.shares / 2),
+        orderType: config.stopLossOrderType,
+        ttlMs: config.stopLossOrderTtlMs,
+        reason: "managed half stop-loss",
+        holdRestAfterFill: config.halfStopHoldRestToSettlement,
+      };
+    }
   }
 
   if (
@@ -621,33 +650,6 @@ function chooseExit(params: {
         };
       }
     }
-  }
-
-  if (profitRatio >= 0) return null;
-  if (!config.stopLossEnabled) return null;
-  if (sideCurrentGap > 0) return null;
-
-  const lossRatio = -profitRatio;
-  if (lossRatio >= config.fullStopLossRatio) {
-    return {
-      price: roundPrice(params.bid),
-      shares: params.pos.shares,
-      orderType: config.stopLossOrderType,
-      ttlMs: config.stopLossOrderTtlMs,
-      reason: "managed full stop-loss",
-      holdRestAfterFill: false,
-    };
-  }
-
-  if (lossRatio >= config.halfStopLossRatio && !params.pos.halfStopped) {
-    return {
-      price: roundPrice(params.bid),
-      shares: roundShares(params.pos.shares / 2),
-      orderType: config.stopLossOrderType,
-      ttlMs: config.stopLossOrderTtlMs,
-      reason: "managed half stop-loss",
-      holdRestAfterFill: true,
-    };
   }
 
   return null;
