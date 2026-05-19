@@ -80,15 +80,15 @@ const basePosition = {
 describe("btc-5m-arb", () => {
   test("parses the requested timing and order-type defaults", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({});
-    expect(config.shares).toBe(3);
+    expect(config.shares).toBe(4);
     expect(config.entryStartElapsedSeconds).toBe(67);
     expect(config.entryEndElapsedSeconds).toBe(217);
-    expect(config.managedExitStartElapsedSeconds).toBe(190);
+    expect(config.managedExitStartElapsedSeconds).toBe(200);
     expect(config.holdOnlyStartElapsedSeconds).toBe(297);
-    expect(config.entryOrderType).toBe("GTC");
+    expect(config.entryOrderType).toBe("FAK");
     expect(config.takeProfitOrderType).toBe("GTC");
     expect(config.stopLossOrderType).toBe("FAK");
-    expect(config.maxAdvantagePrice).toBe(0.58);
+    expect(config.maxAdvantagePrice).toBe(0.6);
     expect(config.maxReversalPrice).toBe(0.52);
     expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.18);
     expect(config.entryTakeProfitEnabled).toBe(false);
@@ -114,8 +114,8 @@ describe("btc-5m-arb", () => {
     });
     expect(entry?.kind).toBe("advantage");
     expect(entry?.side).toBe("UP");
-    expect(entry?.price).toBe(0.57);
-    expect(entry?.shares).toBe(3);
+    expect(entry?.price).toBe(0.58);
+    expect(entry?.shares).toBe(4);
 
     expect(
       __btc5mArbTestHooks.chooseEntry({
@@ -247,6 +247,9 @@ describe("btc-5m-arb", () => {
       bid: 0.8,
       bidLiquidity: 20,
       elapsed: 230,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.28",
+      }),
     });
     expect(fullTp?.reason).toBe("managed full take-profit");
     expect(fullTp?.shares).toBe(6);

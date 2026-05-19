@@ -127,9 +127,9 @@ type PendingSell = {
 };
 
 const LOG_DIR = process.env.B5A_BACKTEST_LOG_DIR ?? "logs";
-const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-19-random-exrun-v1";
+const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-19-random-exrun2-v1";
 const SPLIT_MODE = process.env.B5A_BACKTEST_SPLIT_MODE ?? "random";
-const EXCLUDE_RUN_LOG = process.env.B5A_BACKTEST_EXCLUDE_RUN_LOG ?? "logs/early-bird-2026-05-19-02-26-51.log";
+const EXCLUDE_RUN_LOG = process.env.B5A_BACKTEST_EXCLUDE_RUN_LOG ?? "logs/early-bird-2026-05-19-09-52-58.log";
 const MIN_VALIDATION_TRADED_MARKETS = Math.max(
   1,
   Number(process.env.B5A_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 20),
@@ -898,24 +898,33 @@ function buildVariants(): Variant[] {
   ];
 
   const shareProfiles = [
+    { name: "shares2", env: { B5A_SHARES: "2" } },
     { name: "shares3", env: { B5A_SHARES: "3" } },
     { name: "shares4", env: { B5A_SHARES: "4" } },
+  ];
+
+  const executionProfiles = [
+    { name: "passive", env: { B5A_ENTRY_ORDER_TYPE: "GTC", B5A_ENTRY_ORDER_TTL_MS: "2500" } },
+    { name: "marketable", env: { B5A_ENTRY_ORDER_TYPE: "FAK", B5A_ENTRY_ORDER_TTL_MS: "750" } },
   ];
 
   const specs: Array<{ name: string; profile: Profile; env: Record<string, string> }> = [];
   for (const entryProfile of entryProfiles) {
     for (const exitProfile of exitProfiles) {
       for (const shareProfile of shareProfiles) {
-        specs.push({
-          name: `${entryProfile.name}_${exitProfile.name}_${shareProfile.name}`,
-          profile: entryProfile.profile,
-          env: {
-            ...baseEnv,
-            ...entryProfile.env,
-            ...exitProfile.env,
-            ...shareProfile.env,
-          },
-        });
+        for (const executionProfile of executionProfiles) {
+          specs.push({
+            name: `${entryProfile.name}_${exitProfile.name}_${shareProfile.name}_${executionProfile.name}`,
+            profile: entryProfile.profile,
+            env: {
+              ...baseEnv,
+              ...entryProfile.env,
+              ...exitProfile.env,
+              ...shareProfile.env,
+              ...executionProfile.env,
+            },
+          });
+        }
       }
     }
   }
@@ -968,20 +977,29 @@ function pickDefaultWinner(variants: Variant[]): {
       const left = a.validation!;
       const right = b.validation!;
       const leftRobustScore =
-        Math.min(a.train!.pnl, left.pnl) - left.maxDrawdown * 0.1 - a.config.shares * 0.8;
+        Math.min(a.train!.pnl, left.pnl) +
+        left.pnl * 0.35 +
+        Math.log1p(left.tradedMarkets) * 0.35 -
+        left.maxDrawdown * 0.05 -
+        a.config.shares * 0.15;
       const rightRobustScore =
-        Math.min(b.train!.pnl, right.pnl) - right.maxDrawdown * 0.1 - b.config.shares * 0.8;
+        Math.min(b.train!.pnl, right.pnl) +
+        right.pnl * 0.35 +
+        Math.log1p(right.tradedMarkets) * 0.35 -
+        right.maxDrawdown * 0.05 -
+        b.config.shares * 0.15;
       if (rightRobustScore !== leftRobustScore) return rightRobustScore - leftRobustScore;
-      if (a.config.shares !== b.config.shares) return a.config.shares - b.config.shares;
       if (right.pnl !== left.pnl) return right.pnl - left.pnl;
+      if (right.tradedMarkets !== left.tradedMarkets) return right.tradedMarkets - left.tradedMarkets;
       if (left.maxDrawdown !== right.maxDrawdown) return left.maxDrawdown - right.maxDrawdown;
       if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
+      if (a.config.shares !== b.config.shares) return a.config.shares - b.config.shares;
       return right.trades - left.trades;
     })[0]!;
     return {
       winner,
       eligibleCount: eligible.length,
-      selection: "risk_adjusted_train_validation_positive_min_coverage",
+      selection: "growth_train_validation_positive_with_participation_bonus",
     };
   }
 
@@ -1129,7 +1147,7 @@ async function main() {
       requireTrainPnlPositive: true,
       requireValidationPnlPositive: true,
       rankBy:
-        "risk_adjusted_min_train_validation_pnl_with_drawdown_and_share_penalty; fallback=min_share_conservative_validation_positive_score",
+        "growth_train_validation_positive_with_participation_bonus; fallback=min_share_conservative_validation_positive_score",
       defaultEligibleCount: eligibleCount,
     },
     validationTable,
