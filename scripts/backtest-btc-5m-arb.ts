@@ -127,8 +127,9 @@ type PendingSell = {
 };
 
 const LOG_DIR = process.env.B5A_BACKTEST_LOG_DIR ?? "logs";
-const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-19-walkforward-v1";
-const SPLIT_MODE = process.env.B5A_BACKTEST_SPLIT_MODE ?? "chronological";
+const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-19-random-exrun-v1";
+const SPLIT_MODE = process.env.B5A_BACKTEST_SPLIT_MODE ?? "random";
+const EXCLUDE_RUN_LOG = process.env.B5A_BACKTEST_EXCLUDE_RUN_LOG ?? "logs/early-bird-2026-05-19-02-26-51.log";
 const MIN_VALIDATION_TRADED_MARKETS = Math.max(
   1,
   Number(process.env.B5A_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 20),
@@ -752,6 +753,40 @@ function buildVariants(): Variant[] {
       },
     },
     {
+      name: "deep_adv_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "1.5",
+        B5A_ADV_MIN_MOMENTUM: "0.05",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "2",
+        B5A_MAX_ADVANTAGE_PRICE: "0.46",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "9",
+        B5A_REV_MIN_MOMENTUM: "0.05",
+      },
+    },
+    {
+      name: "mid_adv_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "1.5",
+        B5A_ADV_MIN_MOMENTUM: "0.05",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "2",
+        B5A_MAX_ADVANTAGE_PRICE: "0.52",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "9",
+        B5A_REV_MIN_MOMENTUM: "0.05",
+      },
+    },
+    {
       name: "balanced_both",
       profile: "conservative",
       env: {
@@ -933,9 +968,9 @@ function pickDefaultWinner(variants: Variant[]): {
       const left = a.validation!;
       const right = b.validation!;
       const leftRobustScore =
-        Math.min(a.train!.pnl, left.pnl) - left.maxDrawdown * 0.1 - a.config.shares * 0.25;
+        Math.min(a.train!.pnl, left.pnl) - left.maxDrawdown * 0.1 - a.config.shares * 0.8;
       const rightRobustScore =
-        Math.min(b.train!.pnl, right.pnl) - right.maxDrawdown * 0.1 - b.config.shares * 0.25;
+        Math.min(b.train!.pnl, right.pnl) - right.maxDrawdown * 0.1 - b.config.shares * 0.8;
       if (rightRobustScore !== leftRobustScore) return rightRobustScore - leftRobustScore;
       if (a.config.shares !== b.config.shares) return a.config.shares - b.config.shares;
       if (right.pnl !== left.pnl) return right.pnl - left.pnl;
@@ -1000,11 +1035,27 @@ function compactResult(result: Result) {
 }
 
 async function loadMarkets(): Promise<ReplayMarket[]> {
+  const excludedSlugs = await loadExcludedSlugs();
   const files = (await readdir(LOG_DIR))
     .filter((file) => /^early-bird-btc-updown-5m-\d+\.log$/.test(file))
+    .filter((file) => !excludedSlugs.has(file.replace(/^early-bird-/, "").replace(/\.log$/, "")))
     .sort();
   const loaded = await Promise.all(files.map((file) => loadMarket(join(LOG_DIR, file))));
   return loaded.filter((market): market is ReplayMarket => !!market && !!market.resolution);
+}
+
+async function loadExcludedSlugs(): Promise<Set<string>> {
+  const slugs = new Set<string>();
+  if (!EXCLUDE_RUN_LOG) return slugs;
+  try {
+    const text = await Bun.file(EXCLUDE_RUN_LOG).text();
+    for (const match of text.matchAll(/\[(btc-updown-5m-\d+)\]/g)) {
+      slugs.add(match[1]!);
+    }
+  } catch {
+    // Missing exclude logs should not block older backtest workflows.
+  }
+  return slugs;
 }
 
 async function main() {
@@ -1061,6 +1112,7 @@ async function main() {
     logDir: LOG_DIR,
     splitSeed: SPLIT_SEED,
     splitMode: SPLIT_MODE,
+    excludeRunLog: EXCLUDE_RUN_LOG || null,
     scannedMarkets: markets.length,
     split: {
       train: train.length,
@@ -1077,7 +1129,7 @@ async function main() {
       requireTrainPnlPositive: true,
       requireValidationPnlPositive: true,
       rankBy:
-        "max_min_train_validation_pnl_then_validation_pnl; fallback=min_share_conservative_validation_positive_score",
+        "risk_adjusted_min_train_validation_pnl_with_drawdown_and_share_penalty; fallback=min_share_conservative_validation_positive_score",
       defaultEligibleCount: eligibleCount,
     },
     validationTable,

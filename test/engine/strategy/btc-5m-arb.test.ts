@@ -80,20 +80,20 @@ const basePosition = {
 describe("btc-5m-arb", () => {
   test("parses the requested timing and order-type defaults", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({});
-    expect(config.shares).toBe(6);
+    expect(config.shares).toBe(3);
     expect(config.entryStartElapsedSeconds).toBe(67);
     expect(config.entryEndElapsedSeconds).toBe(217);
-    expect(config.managedExitStartElapsedSeconds).toBe(222);
+    expect(config.managedExitStartElapsedSeconds).toBe(190);
     expect(config.holdOnlyStartElapsedSeconds).toBe(297);
     expect(config.entryOrderType).toBe("GTC");
     expect(config.takeProfitOrderType).toBe("GTC");
     expect(config.stopLossOrderType).toBe("FAK");
     expect(config.maxAdvantagePrice).toBe(0.58);
-    expect(config.maxReversalPrice).toBe(0.51);
+    expect(config.maxReversalPrice).toBe(0.52);
     expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.18);
     expect(config.entryTakeProfitEnabled).toBe(false);
     expect(config.managedTakeProfitEnabled).toBe(true);
-    expect(config.stopLossEnabled).toBe(false);
+    expect(config.stopLossEnabled).toBe(true);
     expect(config.smallProfitExitMode).toBe("full_exit");
     expect(config.halfStopHoldRestToSettlement).toBe(false);
   });
@@ -115,7 +115,7 @@ describe("btc-5m-arb", () => {
     expect(entry?.kind).toBe("advantage");
     expect(entry?.side).toBe("UP");
     expect(entry?.price).toBe(0.57);
-    expect(entry?.shares).toBe(6);
+    expect(entry?.shares).toBe(3);
 
     expect(
       __btc5mArbTestHooks.chooseEntry({
@@ -147,6 +147,7 @@ describe("btc-5m-arb", () => {
       stats: reversalStats(),
       state: baseState(),
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_ENABLE_REVERSAL: "true",
         B5A_REV_MAX_ABS_GAP: "4",
         B5A_REV_MIN_MOMENTUM: "0.2",
       }),
@@ -203,6 +204,9 @@ describe("btc-5m-arb", () => {
       bid: 0.2,
       bidLiquidity: 20,
       elapsed: 180,
+      config: __btc5mArbTestHooks.readBtc5mArbConfig({
+        B5A_STOP_LOSS_ENABLED: "false",
+      }),
     });
     expect(disabledStop).toBeNull();
 
@@ -216,6 +220,7 @@ describe("btc-5m-arb", () => {
       elapsed: 180,
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
         B5A_STOP_LOSS_ENABLED: "true",
+        B5A_FULL_STOP_LOSS_RATIO: "0.67",
       }),
     });
     expect(enabledStop?.reason).toBe("managed half stop-loss");
@@ -287,6 +292,7 @@ describe("btc-5m-arb", () => {
       elapsed: 230,
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
         B5A_STOP_LOSS_ENABLED: "true",
+        B5A_FULL_STOP_LOSS_RATIO: "0.67",
       }),
     });
     expect(exit).toBeNull();
@@ -303,6 +309,7 @@ describe("btc-5m-arb", () => {
       elapsed: 230,
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
         B5A_STOP_LOSS_ENABLED: "true",
+        B5A_FULL_STOP_LOSS_RATIO: "0.67",
       }),
     });
     expect(half?.reason).toBe("managed half stop-loss");
@@ -320,6 +327,7 @@ describe("btc-5m-arb", () => {
       elapsed: 230,
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
         B5A_STOP_LOSS_ENABLED: "true",
+        B5A_FULL_STOP_LOSS_RATIO: "0.67",
         B5A_HALF_STOP_HOLD_REST_TO_SETTLEMENT: "true",
       }),
     });
