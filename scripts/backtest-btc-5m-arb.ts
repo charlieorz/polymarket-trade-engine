@@ -127,7 +127,8 @@ type PendingSell = {
 };
 
 const LOG_DIR = process.env.B5A_BACKTEST_LOG_DIR ?? "logs";
-const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-18-low-risk-v1";
+const SPLIT_SEED = process.env.B5A_BACKTEST_SPLIT_SEED ?? "btc-5m-arb-2026-05-19-walkforward-v1";
+const SPLIT_MODE = process.env.B5A_BACKTEST_SPLIT_MODE ?? "chronological";
 const MIN_VALIDATION_TRADED_MARKETS = Math.max(
   1,
   Number(process.env.B5A_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 20),
@@ -474,6 +475,7 @@ function simulateMarket(
       bid: quality?.bid ?? null,
       bidLiquidity: quality?.bidLiquidity ?? 0,
       elapsed: sample.elapsed,
+      nowMs: sample.ts,
       config,
     });
     if (!exit) continue;
@@ -637,6 +639,10 @@ function buildVariants(): Variant[] {
     B5A_STOP_LOSS_ENABLED: "true",
     B5A_SMALL_PROFIT_EXIT_MODE: "full_exit",
     B5A_HALF_STOP_HOLD_REST_TO_SETTLEMENT: "false",
+    B5A_ENABLE_ADVANTAGE: "true",
+    B5A_ENABLE_REVERSAL: "true",
+    B5A_STOP_LOSS_START_SECONDS: "0",
+    B5A_STOP_LOSS_MIN_HOLD_SECONDS: "0",
   };
 
   const entryProfiles: Array<{
@@ -645,39 +651,141 @@ function buildVariants(): Variant[] {
     env: Record<string, string>;
   }> = [
     {
-      name: "reversal_only_low",
+      name: "wide_both_a",
       profile: "conservative",
       env: {
-        B5A_MAX_SPREAD: "0.04",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "8",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "8",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "2",
+        B5A_ADV_MIN_MOMENTUM: "0.08",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "5",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.52",
+        B5A_REV_MAX_ABS_GAP: "8",
+        B5A_REV_MIN_MOMENTUM: "0.08",
+      },
+    },
+    {
+      name: "wide_adv_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "2",
+        B5A_ADV_MIN_MOMENTUM: "0.08",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "5",
+        B5A_MAX_ADVANTAGE_PRICE: "0.58",
+        B5A_MAX_REVERSAL_PRICE: "0.52",
+        B5A_REV_MAX_ABS_GAP: "8",
+        B5A_REV_MIN_MOMENTUM: "0.08",
+      },
+    },
+    {
+      name: "discount_reversal_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_ADVANTAGE: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
         B5A_ADV_MIN_ABS_GAP: "999",
         B5A_ADV_MIN_MOMENTUM: "999",
         B5A_ADV_MIN_CUMULATIVE_GAP: "999",
         B5A_MAX_ADVANTAGE_PRICE: "0.45",
-        B5A_MAX_REVERSAL_PRICE: "0.49",
-        B5A_REV_MAX_ABS_GAP: "3",
-        B5A_REV_MIN_MOMENTUM: "0.35",
+        B5A_MAX_REVERSAL_PRICE: "0.47",
+        B5A_REV_MAX_ABS_GAP: "8",
+        B5A_REV_MIN_MOMENTUM: "0.08",
       },
     },
     {
-      name: "ultra_low",
+      name: "deep_reversal_only",
       profile: "conservative",
       env: {
-        B5A_MAX_SPREAD: "0.045",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "8",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "8",
-        B5A_ADV_MIN_ABS_GAP: "5",
-        B5A_ADV_MIN_MOMENTUM: "0.3",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "60",
-        B5A_MAX_ADVANTAGE_PRICE: "0.5",
-        B5A_MAX_REVERSAL_PRICE: "0.49",
-        B5A_REV_MAX_ABS_GAP: "4",
-        B5A_REV_MIN_MOMENTUM: "0.3",
+        B5A_ENABLE_ADVANTAGE: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "999",
+        B5A_ADV_MIN_MOMENTUM: "999",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "999",
+        B5A_MAX_ADVANTAGE_PRICE: "0.45",
+        B5A_MAX_REVERSAL_PRICE: "0.42",
+        B5A_REV_MAX_ABS_GAP: "9",
+        B5A_REV_MIN_MOMENTUM: "0.06",
       },
     },
     {
-      name: "low_a",
+      name: "mid_reversal_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_ADVANTAGE: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "999",
+        B5A_ADV_MIN_MOMENTUM: "999",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "999",
+        B5A_MAX_ADVANTAGE_PRICE: "0.45",
+        B5A_MAX_REVERSAL_PRICE: "0.44",
+        B5A_REV_MAX_ABS_GAP: "9",
+        B5A_REV_MIN_MOMENTUM: "0.06",
+      },
+    },
+    {
+      name: "cheap_adv_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.07",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5A_ADV_MIN_ABS_GAP: "1.5",
+        B5A_ADV_MIN_MOMENTUM: "0.05",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "2",
+        B5A_MAX_ADVANTAGE_PRICE: "0.5",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "9",
+        B5A_REV_MIN_MOMENTUM: "0.05",
+      },
+    },
+    {
+      name: "balanced_both",
+      profile: "conservative",
+      env: {
+        B5A_MAX_SPREAD: "0.06",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
+        B5A_ADV_MIN_ABS_GAP: "3",
+        B5A_ADV_MIN_MOMENTUM: "0.12",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "10",
+        B5A_MAX_ADVANTAGE_PRICE: "0.56",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "6.5",
+        B5A_REV_MIN_MOMENTUM: "0.12",
+      },
+    },
+    {
+      name: "loose_adv_only",
+      profile: "aggressive",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.08",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "2.5",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "2.5",
+        B5A_ADV_MIN_ABS_GAP: "1.5",
+        B5A_ADV_MIN_MOMENTUM: "0.05",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "2",
+        B5A_MAX_ADVANTAGE_PRICE: "0.6",
+        B5A_MAX_REVERSAL_PRICE: "0.52",
+        B5A_REV_MAX_ABS_GAP: "9",
+        B5A_REV_MIN_MOMENTUM: "0.05",
+      },
+    },
+    {
+      name: "current_reference",
       profile: "conservative",
       env: {
         B5A_MAX_SPREAD: "0.05",
@@ -692,169 +800,64 @@ function buildVariants(): Variant[] {
         B5A_REV_MIN_MOMENTUM: "0.26",
       },
     },
-    {
-      name: "low_b",
-      profile: "conservative",
-      env: {
-        B5A_MAX_SPREAD: "0.055",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "4",
-        B5A_ADV_MIN_MOMENTUM: "0.22",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "30",
-        B5A_MAX_ADVANTAGE_PRICE: "0.5",
-        B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "5",
-        B5A_REV_MIN_MOMENTUM: "0.22",
-      },
-    },
-    {
-      name: "low_c",
-      profile: "aggressive",
-      env: {
-        B5A_MAX_SPREAD: "0.055",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "3.5",
-        B5A_ADV_MIN_MOMENTUM: "0.2",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "24",
-        B5A_MAX_ADVANTAGE_PRICE: "0.51",
-        B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "5.5",
-        B5A_REV_MIN_MOMENTUM: "0.2",
-      },
-    },
-    {
-      name: "legacy_a_reference",
-      profile: "conservative",
-      env: {
-        B5A_MAX_SPREAD: "0.04",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "7",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "7",
-        B5A_ADV_MIN_ABS_GAP: "5",
-        B5A_ADV_MIN_MOMENTUM: "0.28",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "55",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.5",
-        B5A_REV_MAX_ABS_GAP: "4",
-        B5A_REV_MIN_MOMENTUM: "0.28",
-      },
-    },
-    {
-      name: "aggressive_a",
-      profile: "aggressive",
-      env: {
-        B5A_MAX_SPREAD: "0.05",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "4",
-        B5A_ADV_MIN_MOMENTUM: "0.2",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "25",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.51",
-        B5A_REV_MAX_ABS_GAP: "5",
-        B5A_REV_MIN_MOMENTUM: "0.2",
-      },
-    },
-    {
-      name: "aggressive_b",
-      profile: "aggressive",
-      env: {
-        B5A_MAX_SPREAD: "0.06",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
-        B5A_ADV_MIN_ABS_GAP: "3",
-        B5A_ADV_MIN_MOMENTUM: "0.14",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "10",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.51",
-        B5A_REV_MAX_ABS_GAP: "6",
-        B5A_REV_MIN_MOMENTUM: "0.14",
-      },
-    },
-    {
-      name: "aggressive_c",
-      profile: "aggressive",
-      env: {
-        B5A_MAX_SPREAD: "0.055",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "5",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "5",
-        B5A_ADV_MIN_ABS_GAP: "3.5",
-        B5A_ADV_MIN_MOMENTUM: "0.18",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "18",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.51",
-        B5A_REV_MAX_ABS_GAP: "5.5",
-        B5A_REV_MIN_MOMENTUM: "0.16",
-      },
-    },
-    {
-      name: "aggressive_d",
-      profile: "aggressive",
-      env: {
-        B5A_MAX_SPREAD: "0.06",
-        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
-        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
-        B5A_ADV_MIN_ABS_GAP: "3",
-        B5A_ADV_MIN_MOMENTUM: "0.12",
-        B5A_ADV_MIN_CUMULATIVE_GAP: "8",
-        B5A_MAX_ADVANTAGE_PRICE: "0.58",
-        B5A_MAX_REVERSAL_PRICE: "0.51",
-        B5A_REV_MAX_ABS_GAP: "6.5",
-        B5A_REV_MIN_MOMENTUM: "0.12",
-      },
-    },
   ];
 
   const exitProfiles: Array<{ name: string; env: Record<string, string> }> = [
     {
-      name: "early160_stop15_35",
+      name: "no_half_delay30_stop35",
       env: {
-        B5A_MANAGED_EXIT_START_SECONDS: "160",
-        B5A_HALF_STOP_LOSS_RATIO: "0.15",
+        B5A_MANAGED_EXIT_START_SECONDS: "170",
+        B5A_STOP_LOSS_START_SECONDS: "120",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "30",
+        B5A_HALF_STOP_LOSS_RATIO: "0.35",
         B5A_FULL_STOP_LOSS_RATIO: "0.35",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.85",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.22",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.78",
       },
     },
     {
-      name: "early180_stop20_40",
+      name: "no_half_delay45_stop45",
       env: {
-        B5A_MANAGED_EXIT_START_SECONDS: "180",
-        B5A_HALF_STOP_LOSS_RATIO: "0.2",
-        B5A_FULL_STOP_LOSS_RATIO: "0.4",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
+        B5A_MANAGED_EXIT_START_SECONDS: "190",
+        B5A_STOP_LOSS_START_SECONDS: "150",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "45",
+        B5A_HALF_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.28",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.82",
       },
     },
     {
-      name: "early180_stop30_40",
+      name: "half_delay45_stop30_50",
       env: {
-        B5A_MANAGED_EXIT_START_SECONDS: "180",
+        B5A_MANAGED_EXIT_START_SECONDS: "190",
+        B5A_STOP_LOSS_START_SECONDS: "150",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "45",
         B5A_HALF_STOP_LOSS_RATIO: "0.3",
-        B5A_FULL_STOP_LOSS_RATIO: "0.4",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.4",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
+        B5A_FULL_STOP_LOSS_RATIO: "0.5",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.28",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.82",
       },
     },
     {
-      name: "early200_stop30_45",
+      name: "managed_tp_no_stop",
+      env: {
+        B5A_MANAGED_EXIT_START_SECONDS: "190",
+        B5A_STOP_LOSS_ENABLED: "false",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.28",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.82",
+      },
+    },
+    {
+      name: "current_stop_reference",
       env: {
         B5A_MANAGED_EXIT_START_SECONDS: "200",
+        B5A_STOP_LOSS_START_SECONDS: "0",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "0",
         B5A_HALF_STOP_LOSS_RATIO: "0.3",
         B5A_FULL_STOP_LOSS_RATIO: "0.45",
         B5A_FULL_TAKE_PROFIT_RATIO: "0.45",
         B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.87",
-      },
-    },
-    {
-      name: "baseline222_stop35_55",
-      env: {
-        B5A_MANAGED_EXIT_START_SECONDS: "222",
-        B5A_HALF_STOP_LOSS_RATIO: "0.35",
-        B5A_FULL_STOP_LOSS_RATIO: "0.55",
-        B5A_FULL_TAKE_PROFIT_RATIO: "0.5",
-        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.9",
       },
     },
   ];
@@ -862,7 +865,6 @@ function buildVariants(): Variant[] {
   const shareProfiles = [
     { name: "shares3", env: { B5A_SHARES: "3" } },
     { name: "shares4", env: { B5A_SHARES: "4" } },
-    { name: "shares6", env: { B5A_SHARES: "6" } },
   ];
 
   const specs: Array<{ name: string; profile: Profile; env: Record<string, string> }> = [];
@@ -890,7 +892,10 @@ function buildVariants(): Variant[] {
 }
 
 function splitMarkets(markets: ReplayMarket[]) {
-  const ordered = shuffled(markets, SPLIT_SEED);
+  const ordered =
+    SPLIT_MODE === "random"
+      ? shuffled(markets, SPLIT_SEED)
+      : [...markets].sort((a, b) => a.slotEndMs - b.slotEndMs);
   const trainCount = Math.floor(ordered.length * 0.6);
   const validationCount = Math.floor(ordered.length * 0.2);
   const train = ordered.slice(0, trainCount);
@@ -927,9 +932,12 @@ function pickDefaultWinner(variants: Variant[]): {
     const winner = [...eligible].sort((a, b) => {
       const left = a.validation!;
       const right = b.validation!;
-      const leftRobustPnl = Math.min(a.train!.pnl, left.pnl);
-      const rightRobustPnl = Math.min(b.train!.pnl, right.pnl);
-      if (rightRobustPnl !== leftRobustPnl) return rightRobustPnl - leftRobustPnl;
+      const leftRobustScore =
+        Math.min(a.train!.pnl, left.pnl) - left.maxDrawdown * 0.1 - a.config.shares * 0.25;
+      const rightRobustScore =
+        Math.min(b.train!.pnl, right.pnl) - right.maxDrawdown * 0.1 - b.config.shares * 0.25;
+      if (rightRobustScore !== leftRobustScore) return rightRobustScore - leftRobustScore;
+      if (a.config.shares !== b.config.shares) return a.config.shares - b.config.shares;
       if (right.pnl !== left.pnl) return right.pnl - left.pnl;
       if (left.maxDrawdown !== right.maxDrawdown) return left.maxDrawdown - right.maxDrawdown;
       if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
@@ -938,7 +946,7 @@ function pickDefaultWinner(variants: Variant[]): {
     return {
       winner,
       eligibleCount: eligible.length,
-      selection: "robust_train_validation_pnl_best_among_positive_and_min_coverage",
+      selection: "risk_adjusted_train_validation_positive_min_coverage",
     };
   }
 
@@ -1052,6 +1060,7 @@ async function main() {
   const output = {
     logDir: LOG_DIR,
     splitSeed: SPLIT_SEED,
+    splitMode: SPLIT_MODE,
     scannedMarkets: markets.length,
     split: {
       train: train.length,

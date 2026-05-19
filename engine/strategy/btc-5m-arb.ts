@@ -28,6 +28,8 @@ type Config = {
   minExitLiquidityUsd: number;
   maxAdvantagePrice: number;
   maxReversalPrice: number;
+  enableAdvantage: boolean;
+  enableReversal: boolean;
   advantageMinAbsGap: number;
   advantageMinMomentum: number;
   advantageMinCumulativeGap: number;
@@ -39,6 +41,8 @@ type Config = {
   fullTakeProfitRatio: number;
   halfStopLossRatio: number;
   fullStopLossRatio: number;
+  stopLossStartElapsedSeconds: number;
+  stopLossMinHoldSeconds: number;
   entryTakeProfitEnabled: boolean;
   managedTakeProfitEnabled: boolean;
   stopLossEnabled: boolean;
@@ -215,6 +219,8 @@ export function readBtc5mArbConfig(
     minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_EXIT_LIQUIDITY_USD", 5)),
     maxAdvantagePrice: clamp(parseNumberEnv(env, "B5A_MAX_ADVANTAGE_PRICE", 0.58), 0.01, 0.99),
     maxReversalPrice: clamp(parseNumberEnv(env, "B5A_MAX_REVERSAL_PRICE", 0.51), 0.01, 0.99),
+    enableAdvantage: parseBooleanEnv(env, "B5A_ENABLE_ADVANTAGE", true),
+    enableReversal: parseBooleanEnv(env, "B5A_ENABLE_REVERSAL", true),
     advantageMinAbsGap: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_ABS_GAP", 4)),
     advantageMinMomentum: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_MOMENTUM", 0.18)),
     advantageMinCumulativeGap: Math.max(
@@ -233,6 +239,11 @@ export function readBtc5mArbConfig(
     fullTakeProfitRatio: Math.max(0, parseNumberEnv(env, "B5A_FULL_TAKE_PROFIT_RATIO", 0.4)),
     halfStopLossRatio: clamp(parseNumberEnv(env, "B5A_HALF_STOP_LOSS_RATIO", 0.52), 0, 0.99),
     fullStopLossRatio: clamp(parseNumberEnv(env, "B5A_FULL_STOP_LOSS_RATIO", 0.67), 0, 0.99),
+    stopLossStartElapsedSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_STOP_LOSS_START_SECONDS", 0),
+    ),
+    stopLossMinHoldSeconds: Math.max(0, parseNumberEnv(env, "B5A_STOP_LOSS_MIN_HOLD_SECONDS", 0)),
     entryTakeProfitEnabled: parseBooleanEnv(env, "B5A_ENTRY_TAKE_PROFIT_ENABLED", false),
     managedTakeProfitEnabled: parseBooleanEnv(env, "B5A_MANAGED_TAKE_PROFIT_ENABLED", true),
     stopLossEnabled: parseBooleanEnv(env, "B5A_STOP_LOSS_ENABLED", false),
@@ -487,24 +498,29 @@ function chooseEntry(params: {
   if (params.gap === 0) return null;
 
   const gapSide: Side = params.gap > 0 ? "UP" : "DOWN";
-  const candidates = [
-    buildEntry({
+  const candidates: EntryDecision[] = [];
+  if (config.enableAdvantage) {
+    const entry = buildEntry({
       ctx: params.ctx,
       kind: "advantage",
       side: gapSide,
       gap: params.gap,
       stats: params.stats,
       config,
-    }),
-    buildEntry({
+    });
+    if (entry) candidates.push(entry);
+  }
+  if (config.enableReversal) {
+    const entry = buildEntry({
       ctx: params.ctx,
       kind: "reversal",
       side: opposite(gapSide),
       gap: params.gap,
       stats: params.stats,
       config,
-    }),
-  ].filter((entry): entry is EntryDecision => entry !== null);
+    });
+    if (entry) candidates.push(entry);
+  }
 
   if (candidates.length === 0) return null;
   return candidates.sort((a, b) => b.score - a.score)[0]!;
@@ -518,6 +534,7 @@ function chooseExit(params: {
   bid: number | null;
   bidLiquidity: number;
   elapsed: number;
+  nowMs?: number;
   config?: Config;
 }): ExitDecision | null {
   const config = params.config ?? CONFIG;
@@ -528,6 +545,7 @@ function chooseExit(params: {
 
   const profitRatio = (params.bid - params.pos.entryPrice) / params.pos.entryPrice;
   const sideCurrentGap = sideGap(params.pos.side, params.gap);
+  const holdSeconds = ((params.nowMs ?? Date.now()) - params.pos.entryMs) / 1000;
   const tick = tickSize(params.ctx, params.pos.tokenId);
   const tpPrice = (minPrice: number) =>
     passiveSellPrice({
@@ -556,7 +574,13 @@ function chooseExit(params: {
     }
   }
 
-  if (profitRatio < 0 && config.stopLossEnabled && sideCurrentGap <= 0) {
+  if (
+    profitRatio < 0 &&
+    config.stopLossEnabled &&
+    params.elapsed >= config.stopLossStartElapsedSeconds &&
+    holdSeconds >= config.stopLossMinHoldSeconds &&
+    sideCurrentGap <= 0
+  ) {
     const lossRatio = -profitRatio;
     if (lossRatio >= config.fullStopLossRatio) {
       return {
@@ -941,6 +965,7 @@ export const btc5mArb: Strategy = async (ctx) => {
       bid: bidInfo?.price ?? null,
       bidLiquidity: bidInfo?.liquidity ?? 0,
       elapsed,
+      nowMs: now,
     });
     if (!exit) return;
     placeSell({
