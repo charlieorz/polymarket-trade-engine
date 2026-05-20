@@ -45,3 +45,4 @@ __pycache__/
 .vscode/
 imgs/
 reports/
+*.service

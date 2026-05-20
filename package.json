@@ -5,7 +5,8 @@
   "scripts": {
     "check": "tsc -b --noEmit",
     "backtest:pp": "bun run scripts/backtest-probability-portfolio.ts",
-    "backtest:b5a": "bun run scripts/backtest-btc-5m-arb.ts"
+    "backtest:b5a": "bun run scripts/backtest-btc-5m-arb.ts",
+    "backtest:b5d": "bun run scripts/backtest-btc-5m-dual-edge.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

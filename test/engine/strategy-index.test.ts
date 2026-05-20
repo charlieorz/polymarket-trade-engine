@@ -17,4 +17,8 @@ describe("strategy registry", () => {
   test("registers gap-momentum-edge strategy", () => {
     expect(typeof strategies["gap-momentum-edge"]).toBe("function");
   });
+
+  test("registers btc-5m-dual-edge strategy", () => {
+    expect(typeof strategies["btc-5m-dual-edge"]).toBe("function");
+  });
 });
