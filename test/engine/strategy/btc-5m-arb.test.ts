@@ -51,16 +51,6 @@ function advantageStats() {
   };
 }
 
-function reversalStats() {
-  return {
-    ...__btc5mArbTestHooks.createEdgeStats(),
-    sideVelocityEma: { UP: -0.35, DOWN: 0.35 },
-    gapHistory: [5, 4, 3],
-    lastGap: 3,
-    cumulativeGap: 20,
-  };
-}
-
 const basePosition = {
   kind: "advantage" as const,
   side: "UP" as const,
@@ -89,7 +79,6 @@ describe("btc-5m-arb", () => {
     expect(config.takeProfitOrderType).toBe("GTC");
     expect(config.stopLossOrderType).toBe("FAK");
     expect(config.maxAdvantagePrice).toBe(0.6);
-    expect(config.maxReversalPrice).toBe(0.52);
     expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.18);
     expect(config.entryTakeProfitEnabled).toBe(false);
     expect(config.managedTakeProfitEnabled).toBe(true);
@@ -139,12 +128,18 @@ describe("btc-5m-arb", () => {
     ).toBeNull();
   });
 
-  test("chooses a reversal entry below the reversal price cap", () => {
+  test("does not choose reversal entries even if legacy reversal env vars are set", () => {
     const entry = __btc5mArbTestHooks.chooseEntry({
       ctx: mockCtx({ downAsk: 0.51, downBid: 0.49, upAsk: 0.7 }),
       gap: 3,
       elapsed: 150,
-      stats: reversalStats(),
+      stats: {
+        ...__btc5mArbTestHooks.createEdgeStats(),
+        sideVelocityEma: { UP: -0.35, DOWN: 0.35 },
+        gapHistory: [5, 4, 3],
+        lastGap: 3,
+        cumulativeGap: 20,
+      },
       state: baseState(),
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
         B5A_ENABLE_REVERSAL: "true",
@@ -152,9 +147,7 @@ describe("btc-5m-arb", () => {
         B5A_REV_MIN_MOMENTUM: "0.2",
       }),
     });
-    expect(entry?.kind).toBe("reversal");
-    expect(entry?.side).toBe("DOWN");
-    expect(entry?.price).toBeLessThanOrEqual(0.51);
+    expect(entry).toBeNull();
   });
 
   test("does not submit a second entry after any entry order has been submitted", () => {
@@ -170,7 +163,6 @@ describe("btc-5m-arb", () => {
 
   test("uses dynamic take-profit with a higher minimum entry-window ratio", () => {
     const ratio = __btc5mArbTestHooks.dynamicTakeProfitRatio({
-      kind: "advantage",
       price: 0.64,
       absGap: 4,
       momentum: 0.18,

@@ -4,7 +4,7 @@ import type { Strategy, StrategyContext, StrategyMetrics } from "./types.ts";
 import { Env } from "../../utils/config.ts";
 
 type Side = "UP" | "DOWN";
-type EntryKind = "advantage" | "reversal";
+type EntryKind = "advantage";
 type OrderType = "GTC" | "FOK" | "FAK";
 
 type Config = {
@@ -27,14 +27,10 @@ type Config = {
   minEntryLiquidityUsd: number;
   minExitLiquidityUsd: number;
   maxAdvantagePrice: number;
-  maxReversalPrice: number;
   enableAdvantage: boolean;
-  enableReversal: boolean;
   advantageMinAbsGap: number;
   advantageMinMomentum: number;
   advantageMinCumulativeGap: number;
-  reversalMaxAbsGap: number;
-  reversalMinMomentum: number;
   minTakeProfitRatio: number;
   maxTakeProfitRatio: number;
   takeProfitPriceImmediate: number;
@@ -218,17 +214,13 @@ export function readBtc5mArbConfig(
     minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_ENTRY_LIQUIDITY_USD", 2.5)),
     minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_EXIT_LIQUIDITY_USD", 2.5)),
     maxAdvantagePrice: clamp(parseNumberEnv(env, "B5A_MAX_ADVANTAGE_PRICE", 0.6), 0.01, 0.99),
-    maxReversalPrice: clamp(parseNumberEnv(env, "B5A_MAX_REVERSAL_PRICE", 0.52), 0.01, 0.99),
     enableAdvantage: parseBooleanEnv(env, "B5A_ENABLE_ADVANTAGE", true),
-    enableReversal: parseBooleanEnv(env, "B5A_ENABLE_REVERSAL", false),
     advantageMinAbsGap: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_ABS_GAP", 1.5)),
     advantageMinMomentum: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_MOMENTUM", 0.05)),
     advantageMinCumulativeGap: Math.max(
       0,
       parseNumberEnv(env, "B5A_ADV_MIN_CUMULATIVE_GAP", 2),
     ),
-    reversalMaxAbsGap: Math.max(0, parseNumberEnv(env, "B5A_REV_MAX_ABS_GAP", 8)),
-    reversalMinMomentum: Math.max(0, parseNumberEnv(env, "B5A_REV_MIN_MOMENTUM", 0.08)),
     minTakeProfitRatio: Math.max(0.18, parseNumberEnv(env, "B5A_MIN_TAKE_PROFIT_RATIO", 0.24)),
     maxTakeProfitRatio: Math.max(0.12, parseNumberEnv(env, "B5A_MAX_TAKE_PROFIT_RATIO", 0.44)),
     takeProfitPriceImmediate: clamp(
@@ -281,10 +273,6 @@ function ema(previous: number | null, value: number, period: number): number {
 
 function sideGap(side: Side, gap: number): number {
   return side === "UP" ? gap : -gap;
-}
-
-function opposite(side: Side): Side {
-  return side === "UP" ? "DOWN" : "UP";
 }
 
 function updateStats(
@@ -372,25 +360,15 @@ function passiveSellPrice(params: {
 }
 
 function dynamicTakeProfitRatio(params: {
-  kind: EntryKind;
   price: number;
   absGap: number;
   momentum: number;
   maxPrice: number;
   config: Config;
 }): number {
-  const threshold =
-    params.kind === "advantage"
-      ? Math.max(params.config.advantageMinAbsGap, EPSILON)
-      : Math.max(params.config.reversalMaxAbsGap, EPSILON);
-  const gapScore =
-    params.kind === "advantage"
-      ? clamp(params.absGap / threshold - 1, 0, 2) / 2
-      : clamp((params.config.reversalMaxAbsGap - params.absGap) / threshold, 0, 1);
-  const momentumThreshold =
-    params.kind === "advantage"
-      ? Math.max(params.config.advantageMinMomentum, EPSILON)
-      : Math.max(params.config.reversalMinMomentum, EPSILON);
+  const threshold = Math.max(params.config.advantageMinAbsGap, EPSILON);
+  const gapScore = clamp(params.absGap / threshold - 1, 0, 2) / 2;
+  const momentumThreshold = Math.max(params.config.advantageMinMomentum, EPSILON);
   const momentumScore = clamp(params.momentum / momentumThreshold - 1, 0, 2) / 2;
   const priceScore = clamp((params.maxPrice - params.price) / params.maxPrice, 0, 1);
   return clamp(
@@ -405,16 +383,12 @@ function dynamicTakeProfitRatio(params: {
 
 function buildEntry(params: {
   ctx: StrategyContext;
-  kind: EntryKind;
   side: Side;
   gap: number;
   stats: EdgeStats;
   config: Config;
 }): EntryDecision | null {
-  const maxPrice =
-    params.kind === "advantage"
-      ? params.config.maxAdvantagePrice
-      : params.config.maxReversalPrice;
+  const maxPrice = params.config.maxAdvantagePrice;
   const quality = bookQuality(params.ctx, params.side);
   if (!quality) return null;
   if (quality.ask > maxPrice) return null;
@@ -439,17 +413,11 @@ function buildEntry(params: {
   const cumulativeSideGap = sideGap(params.side, params.stats.cumulativeGap);
   if (momentum === null || recentDelta === null || recentDelta <= 0) return null;
 
-  if (params.kind === "advantage") {
-    if (absGap < params.config.advantageMinAbsGap) return null;
-    if (momentum < params.config.advantageMinMomentum) return null;
-    if (cumulativeSideGap < params.config.advantageMinCumulativeGap) return null;
-  } else {
-    if (absGap > params.config.reversalMaxAbsGap) return null;
-    if (momentum < params.config.reversalMinMomentum) return null;
-  }
+  if (absGap < params.config.advantageMinAbsGap) return null;
+  if (momentum < params.config.advantageMinMomentum) return null;
+  if (cumulativeSideGap < params.config.advantageMinCumulativeGap) return null;
 
   const takeProfitRatio = dynamicTakeProfitRatio({
-    kind: params.kind,
     price,
     absGap,
     momentum,
@@ -461,10 +429,10 @@ function buildEntry(params: {
     takeProfitRatio +
     Math.max(0, maxPrice - price) +
     Math.max(0, momentum) * 0.05 +
-    (params.kind === "advantage" ? Math.max(0, cumulativeSideGap) * 0.0005 : 0);
+    Math.max(0, cumulativeSideGap) * 0.0005;
 
   return {
-    kind: params.kind,
+    kind: "advantage",
     side: params.side,
     tokenId,
     ask: quality.ask,
@@ -497,33 +465,14 @@ function chooseEntry(params: {
   if (params.elapsed >= config.holdOnlyStartElapsedSeconds) return null;
   if (params.gap === 0) return null;
 
-  const gapSide: Side = params.gap > 0 ? "UP" : "DOWN";
-  const candidates: EntryDecision[] = [];
-  if (config.enableAdvantage) {
-    const entry = buildEntry({
-      ctx: params.ctx,
-      kind: "advantage",
-      side: gapSide,
-      gap: params.gap,
-      stats: params.stats,
-      config,
-    });
-    if (entry) candidates.push(entry);
-  }
-  if (config.enableReversal) {
-    const entry = buildEntry({
-      ctx: params.ctx,
-      kind: "reversal",
-      side: opposite(gapSide),
-      gap: params.gap,
-      stats: params.stats,
-      config,
-    });
-    if (entry) candidates.push(entry);
-  }
-
-  if (candidates.length === 0) return null;
-  return candidates.sort((a, b) => b.score - a.score)[0]!;
+  if (!config.enableAdvantage) return null;
+  return buildEntry({
+    ctx: params.ctx,
+    side: params.gap > 0 ? "UP" : "DOWN",
+    gap: params.gap,
+    stats: params.stats,
+    config,
+  });
 }
 
 function chooseExit(params: {

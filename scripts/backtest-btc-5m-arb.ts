@@ -45,7 +45,7 @@ type ReplayMarket = {
 type ReplayTrade = {
   market: string;
   side: Side;
-  kind: "advantage" | "reversal";
+  kind: "advantage";
   entryTs: number;
   exitTs: number;
   entryPrice: number;
@@ -90,7 +90,7 @@ type Variant = {
 };
 
 type Position = {
-  kind: "advantage" | "reversal";
+  kind: "advantage";
   side: Side;
   tokenId: string;
   entryPrice: number;
@@ -106,7 +106,7 @@ type Position = {
 };
 
 type PendingEntry = {
-  kind: "advantage" | "reversal";
+  kind: "advantage";
   side: Side;
   tokenId: string;
   price: number;
@@ -610,7 +610,7 @@ function summarize(
     grossLoss: round(grossLoss),
     maxDrawdown: round(maxDrawdown),
     advantageTrades: trades.filter((trade) => trade.kind === "advantage").length,
-    reversalTrades: trades.filter((trade) => trade.kind === "reversal").length,
+    reversalTrades: 0,
     settlementHeld,
     expiredEntries,
     expiredSells,
