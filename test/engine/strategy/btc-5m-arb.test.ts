@@ -73,12 +73,22 @@ describe("btc-5m-arb", () => {
     expect(config.shares).toBe(4);
     expect(config.entryStartElapsedSeconds).toBe(67);
     expect(config.entryEndElapsedSeconds).toBe(217);
-    expect(config.managedExitStartElapsedSeconds).toBe(200);
+    expect(config.managedExitStartElapsedSeconds).toBe(190);
     expect(config.holdOnlyStartElapsedSeconds).toBe(297);
     expect(config.entryOrderType).toBe("FAK");
     expect(config.takeProfitOrderType).toBe("GTC");
     expect(config.stopLossOrderType).toBe("FAK");
-    expect(config.maxAdvantagePrice).toBe(0.6);
+    expect(config.maxAdvantagePrice).toBe(0.58);
+    expect(config.maxSpread).toBe(0.07);
+    expect(config.advantageMinAbsGap).toBe(2);
+    expect(config.advantageMinMomentum).toBe(0.08);
+    expect(config.advantageMinCumulativeGap).toBe(5);
+    expect(config.takeProfitPriceImmediate).toBe(0.82);
+    expect(config.fullTakeProfitRatio).toBe(0.28);
+    expect(config.halfStopLossRatio).toBe(0.3);
+    expect(config.fullStopLossRatio).toBe(0.5);
+    expect(config.stopLossStartElapsedSeconds).toBe(150);
+    expect(config.stopLossMinHoldSeconds).toBe(45);
     expect(config.minTakeProfitRatio).toBeGreaterThanOrEqual(0.18);
     expect(config.entryTakeProfitEnabled).toBe(false);
     expect(config.managedTakeProfitEnabled).toBe(true);
@@ -218,7 +228,7 @@ describe("btc-5m-arb", () => {
     expect(enabledStop?.reason).toBe("managed half stop-loss");
   });
 
-  test("applies managed take-profit priority in the 222-297 second window", () => {
+  test("applies managed take-profit priority in the managed-exit window", () => {
     const priceTp = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.88, upAsk: 0.9 }),
       pos: { ...basePosition },

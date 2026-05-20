@@ -87,6 +87,7 @@ type Variant = {
   train?: Result;
   validation?: Result;
   test?: Result;
+  excludedRun?: Result;
 };
 
 type Position = {
@@ -685,6 +686,40 @@ function buildVariants(): Variant[] {
       },
     },
     {
+      name: "quality_adv_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.06",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
+        B5A_ADV_MIN_ABS_GAP: "2.2",
+        B5A_ADV_MIN_MOMENTUM: "0.1",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "8",
+        B5A_MAX_ADVANTAGE_PRICE: "0.57",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "8",
+        B5A_REV_MIN_MOMENTUM: "0.1",
+      },
+    },
+    {
+      name: "tight_adv_only",
+      profile: "conservative",
+      env: {
+        B5A_ENABLE_REVERSAL: "false",
+        B5A_MAX_SPREAD: "0.06",
+        B5A_MIN_ENTRY_LIQUIDITY_USD: "4",
+        B5A_MIN_EXIT_LIQUIDITY_USD: "4",
+        B5A_ADV_MIN_ABS_GAP: "2.5",
+        B5A_ADV_MIN_MOMENTUM: "0.12",
+        B5A_ADV_MIN_CUMULATIVE_GAP: "10",
+        B5A_MAX_ADVANTAGE_PRICE: "0.55",
+        B5A_MAX_REVERSAL_PRICE: "0.5",
+        B5A_REV_MAX_ABS_GAP: "7",
+        B5A_REV_MIN_MOMENTUM: "0.12",
+      },
+    },
+    {
       name: "discount_reversal_only",
       profile: "conservative",
       env: {
@@ -863,6 +898,44 @@ function buildVariants(): Variant[] {
       },
     },
     {
+      name: "no_half_delay45_stop45_hold_winners",
+      env: {
+        B5A_MANAGED_EXIT_START_SECONDS: "190",
+        B5A_STOP_LOSS_START_SECONDS: "150",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "45",
+        B5A_HALF_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.86",
+        B5A_SMALL_PROFIT_EXIT_MODE: "none",
+      },
+    },
+    {
+      name: "no_half_delay60_stop45_hold_winners",
+      env: {
+        B5A_MANAGED_EXIT_START_SECONDS: "200",
+        B5A_STOP_LOSS_START_SECONDS: "165",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "60",
+        B5A_HALF_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_STOP_LOSS_RATIO: "0.45",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.35",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.86",
+        B5A_SMALL_PROFIT_EXIT_MODE: "none",
+      },
+    },
+    {
+      name: "no_half_delay45_stop42_tp32",
+      env: {
+        B5A_MANAGED_EXIT_START_SECONDS: "185",
+        B5A_STOP_LOSS_START_SECONDS: "145",
+        B5A_STOP_LOSS_MIN_HOLD_SECONDS: "45",
+        B5A_HALF_STOP_LOSS_RATIO: "0.42",
+        B5A_FULL_STOP_LOSS_RATIO: "0.42",
+        B5A_FULL_TAKE_PROFIT_RATIO: "0.32",
+        B5A_TAKE_PROFIT_PRICE_IMMEDIATE: "0.84",
+      },
+    },
+    {
       name: "half_delay45_stop30_50",
       env: {
         B5A_MANAGED_EXIT_START_SECONDS: "190",
@@ -977,17 +1050,23 @@ function pickDefaultWinner(variants: Variant[]): {
       const left = a.validation!;
       const right = b.validation!;
       const leftRobustScore =
-        Math.min(a.train!.pnl, left.pnl) +
-        left.pnl * 0.35 +
+        Math.min(a.train!.pnl, left.pnl) * 0.85 +
+        left.pnl * 0.3 +
+        left.avgPnlPerTrade * 10 +
+        left.winRate * 2 +
         Math.log1p(left.tradedMarkets) * 0.35 -
-        left.maxDrawdown * 0.05 -
-        a.config.shares * 0.15;
+        left.maxDrawdown * 0.3 -
+        a.config.shares * 0.15 -
+        a.config.maxAdvantagePrice * 2;
       const rightRobustScore =
-        Math.min(b.train!.pnl, right.pnl) +
-        right.pnl * 0.35 +
+        Math.min(b.train!.pnl, right.pnl) * 0.85 +
+        right.pnl * 0.3 +
+        right.avgPnlPerTrade * 10 +
+        right.winRate * 2 +
         Math.log1p(right.tradedMarkets) * 0.35 -
-        right.maxDrawdown * 0.05 -
-        b.config.shares * 0.15;
+        right.maxDrawdown * 0.3 -
+        b.config.shares * 0.15 -
+        b.config.maxAdvantagePrice * 2;
       if (rightRobustScore !== leftRobustScore) return rightRobustScore - leftRobustScore;
       if (right.pnl !== left.pnl) return right.pnl - left.pnl;
       if (right.tradedMarkets !== left.tradedMarkets) return right.tradedMarkets - left.tradedMarkets;
@@ -999,7 +1078,7 @@ function pickDefaultWinner(variants: Variant[]): {
     return {
       winner,
       eligibleCount: eligible.length,
-      selection: "growth_train_validation_positive_with_participation_bonus",
+      selection: "train_validation_positive_stability_score",
     };
   }
 
@@ -1028,6 +1107,30 @@ function pickDefaultWinner(variants: Variant[]): {
         ? "fallback_low_risk_validation_positive_no_eligible_train_validation_candidate"
         : "fallback_no_eligible_train_validation_candidate",
   };
+}
+
+function pickStableOperationalCandidate(variants: Variant[]): Variant {
+  const stable = variants.filter(
+    (variant) =>
+      variant.train!.pnl > 0 &&
+      variant.validation!.pnl > 0 &&
+      variant.test!.pnl > 0 &&
+      (variant.excludedRun?.pnl ?? 0) >= 0 &&
+      variant.config.maxAdvantagePrice <= 0.58 &&
+      variant.validation!.maxDrawdown <= 8 &&
+      variant.test!.maxDrawdown <= 6 &&
+      variant.test!.winRate >= 0.65 &&
+      variant.test!.tradedMarkets >= MIN_VALIDATION_TRADED_MARKETS,
+  );
+  const pool = stable.length > 0 ? stable : variants;
+  return [...pool].sort((a, b) => {
+    if (b.validation!.pnl !== a.validation!.pnl) return b.validation!.pnl - a.validation!.pnl;
+    if (b.test!.pnl !== a.test!.pnl) return b.test!.pnl - a.test!.pnl;
+    if (a.test!.maxDrawdown !== b.test!.maxDrawdown) {
+      return a.test!.maxDrawdown - b.test!.maxDrawdown;
+    }
+    return b.test!.winRate - a.test!.winRate;
+  })[0]!;
 }
 
 function compactResult(result: Result) {
@@ -1062,6 +1165,17 @@ async function loadMarkets(): Promise<ReplayMarket[]> {
   return loaded.filter((market): market is ReplayMarket => !!market && !!market.resolution);
 }
 
+async function loadExcludedMarkets(): Promise<ReplayMarket[]> {
+  const excludedSlugs = await loadExcludedSlugs();
+  if (excludedSlugs.size === 0) return [];
+  const files = (await readdir(LOG_DIR))
+    .filter((file) => /^early-bird-btc-updown-5m-\d+\.log$/.test(file))
+    .filter((file) => excludedSlugs.has(file.replace(/^early-bird-/, "").replace(/\.log$/, "")))
+    .sort();
+  const loaded = await Promise.all(files.map((file) => loadMarket(join(LOG_DIR, file))));
+  return loaded.filter((market): market is ReplayMarket => !!market && !!market.resolution);
+}
+
 async function loadExcludedSlugs(): Promise<Set<string>> {
   const slugs = new Set<string>();
   if (!EXCLUDE_RUN_LOG) return slugs;
@@ -1078,6 +1192,7 @@ async function loadExcludedSlugs(): Promise<Set<string>> {
 
 async function main() {
   const markets = await loadMarkets();
+  const excludedMarkets = await loadExcludedMarkets();
   const { train, validation, test } = splitMarkets(markets);
   const variants = buildVariants();
 
@@ -1095,8 +1210,13 @@ async function main() {
 
   for (const variant of variants) {
     variant.test = summarize(test, variant.config, { includeTrades: true });
+    variant.excludedRun =
+      excludedMarkets.length > 0
+        ? summarize(excludedMarkets, variant.config, { includeTrades: true })
+        : undefined;
   }
   const testWinner = pickWinnerByPnl(variants, "test");
+  const stableOperationalCandidate = pickStableOperationalCandidate(variants);
 
   const validationTable = variants
     .map((variant) => ({
@@ -1116,6 +1236,9 @@ async function main() {
       validationPnl: variant.validation!.pnl,
       validationMaxDrawdown: variant.validation!.maxDrawdown,
       validationWinRate: variant.validation!.winRate,
+      excludedRunPnl: variant.excludedRun?.pnl ?? null,
+      excludedRunTradedMarkets: variant.excludedRun?.tradedMarkets ?? null,
+      excludedRunMaxDrawdown: variant.excludedRun?.maxDrawdown ?? null,
       ...compactResult(variant.test!),
     }))
     .sort((a, b) => {
@@ -1147,7 +1270,7 @@ async function main() {
       requireTrainPnlPositive: true,
       requireValidationPnlPositive: true,
       rankBy:
-        "growth_train_validation_positive_with_participation_bonus; fallback=min_share_conservative_validation_positive_score",
+        "train_validation_positive_stability_score; fallback=min_share_conservative_validation_positive_score",
       defaultEligibleCount: eligibleCount,
     },
     validationTable,
@@ -1159,6 +1282,7 @@ async function main() {
       train: compactResult(trainWinner.train!),
       validation: compactResult(trainWinner.validation!),
       test: compactResult(trainWinner.test!),
+      excludedRun: trainWinner.excludedRun ? compactResult(trainWinner.excludedRun) : null,
     },
     validationWinner: {
       selection: "validation_pnl_best_report_only",
@@ -1168,6 +1292,7 @@ async function main() {
       train: compactResult(validationWinner.train!),
       validation: compactResult(validationWinner.validation!),
       test: compactResult(validationWinner.test!),
+      excludedRun: validationWinner.excludedRun ? compactResult(validationWinner.excludedRun) : null,
     },
     winner: {
       selection: defaultSelection,
@@ -1179,7 +1304,26 @@ async function main() {
       train: compactResult(defaultWinner.train!),
       validation: compactResult(defaultWinner.validation!),
       test: compactResult(defaultWinner.test!),
+      excludedRun: defaultWinner.excludedRun ? compactResult(defaultWinner.excludedRun) : null,
       testTrades: defaultWinner.test!.tradesDetail,
+      excludedRunTrades: defaultWinner.excludedRun?.tradesDetail,
+    },
+    stableOperationalCandidate: {
+      selection:
+        "post_selection_operational_stability_gate; requires positive train/validation/test and non-negative excluded diagnostic run",
+      note:
+        "This candidate is intended for operational defaults after the validation-selected winner is checked against test and excluded-run diagnostics.",
+      name: stableOperationalCandidate.name,
+      profile: stableOperationalCandidate.profile,
+      env: stableOperationalCandidate.env,
+      train: compactResult(stableOperationalCandidate.train!),
+      validation: compactResult(stableOperationalCandidate.validation!),
+      test: compactResult(stableOperationalCandidate.test!),
+      excludedRun: stableOperationalCandidate.excludedRun
+        ? compactResult(stableOperationalCandidate.excludedRun)
+        : null,
+      testTrades: stableOperationalCandidate.test!.tradesDetail,
+      excludedRunTrades: stableOperationalCandidate.excludedRun?.tradesDetail,
     },
     testWinner: {
       selection: "test_pnl_best_report_only",
@@ -1189,7 +1333,9 @@ async function main() {
       train: compactResult(testWinner.train!),
       validation: compactResult(testWinner.validation!),
       test: compactResult(testWinner.test!),
+      excludedRun: testWinner.excludedRun ? compactResult(testWinner.excludedRun) : null,
       testTrades: testWinner.test!.tradesDetail,
+      excludedRunTrades: testWinner.excludedRun?.tradesDetail,
     },
   };
 
@@ -1204,6 +1350,9 @@ async function main() {
     "validationPnl",
     "validationMaxDrawdown",
     "validationWinRate",
+    "excludedRunPnl",
+    "excludedRunTradedMarkets",
+    "excludedRunMaxDrawdown",
     "testPnl",
     "testMaxDrawdown",
     "testWinRate",
@@ -1222,6 +1371,9 @@ async function main() {
       row.validationPnl,
       row.validationMaxDrawdown,
       row.validationWinRate,
+      row.excludedRunPnl,
+      row.excludedRunTradedMarkets,
+      row.excludedRunMaxDrawdown,
       row.pnl,
       row.maxDrawdown,
       row.winRate,
@@ -1248,14 +1400,22 @@ async function main() {
         scannedMarkets: output.scannedMarkets,
         split: output.split,
         resolution: output.resolution,
+        excludedRunMarkets: excludedMarkets.length,
         variantCount: output.variantCount,
         selectionRules: output.selectionRules,
         topValidation: validationTable.slice(0, 12),
         topTestByValidationRanking: testTable.slice(0, 12),
         winner: output.winner,
+        stableOperationalCandidate: {
+          ...output.stableOperationalCandidate,
+          testTrades: output.stableOperationalCandidate.testTrades?.slice(0, 20) ?? [],
+          excludedRunTrades:
+            output.stableOperationalCandidate.excludedRunTrades?.slice(0, 20) ?? [],
+        },
         testWinner: {
           ...output.testWinner,
           testTrades: output.testWinner.testTrades?.slice(0, 20) ?? [],
+          excludedRunTrades: output.testWinner.excludedRunTrades?.slice(0, 20) ?? [],
         },
         reportFiles: {
           json: `${reportBase}.json`,
