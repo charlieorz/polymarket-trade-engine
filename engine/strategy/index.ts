@@ -7,6 +7,7 @@ import { probabilityPortfolio } from "./probability-portfolio.ts";
 import { gapMomentumEdge } from "./gap-momentum-edge.ts";
 import { btc5mArb } from "./btc-5m-arb.ts";
 import { btc5mDualEdge } from "./btc-5m-dual-edge.ts";
+import { btc5mHfArb } from "./btc-5m-hf-arb.ts";
 
 export const strategies: Record<string, Strategy> = {
   "simulation": simulationStrategy,
@@ -17,6 +18,7 @@ export const strategies: Record<string, Strategy> = {
   "gap-momentum-edge": gapMomentumEdge,
   "btc-5m-arb": btc5mArb,
   "btc-5m-dual-edge": btc5mDualEdge,
+  "btc-5m-hf-arb": btc5mHfArb,
 };
 
 export const DEFAULT_STRATEGY = "simulation";

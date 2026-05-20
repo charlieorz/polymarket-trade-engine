@@ -1,0 +1,1459 @@
+import { mkdir, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { __btc5mHfArbTestHooks } from "../engine/strategy/btc-5m-hf-arb.ts";
+
+type Side = "UP" | "DOWN";
+type Profile = "conservative" | "aggressive";
+type EntryKind = "advantage";
+type Level = [number, number];
+type BookSide = { bids: Level[]; asks: Level[] } | null;
+type BookSnapshot = { up: BookSide; down: BookSide };
+type B5hConfig = ReturnType<typeof __btc5mHfArbTestHooks.readBtc5mHfArbConfig>;
+type B5hState = Parameters<typeof __btc5mHfArbTestHooks.chooseEntry>[0]["state"];
+
+type Quality = {
+  ask: number;
+  bid: number | null;
+  askLiquidity: number;
+  bidLiquidity: number;
+  spread: number | null;
+};
+
+type ReplaySample = {
+  ts: number;
+  remaining: number;
+  elapsed: number;
+  price: number;
+  priceToBeat: number;
+  gap: number;
+  upQuality: Quality | null;
+  downQuality: Quality | null;
+};
+
+type ReplayMarket = {
+  file: string;
+  slug: string;
+  slotEndMs: number;
+  samples: ReplaySample[];
+  resolution: {
+    direction: Side;
+    openPrice: number;
+    closePrice: number;
+    source: "explicit" | "inferred";
+  } | null;
+};
+
+type MarketCandle = {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  direction: Side;
+};
+
+type ReplayTrade = {
+  market: string;
+  side: Side;
+  kind: EntryKind;
+  entryTs: number;
+  exitTs: number;
+  entryPrice: number;
+  exitPrice: number | null;
+  shares: number;
+  pnl: number;
+  reason: string;
+};
+
+type Result = {
+  markets: number;
+  explicitResolutionMarkets: number;
+  inferredResolutionMarkets: number;
+  tradedMarkets: number;
+  trades: number;
+  pnl: number;
+  winRate: number;
+  avgPnlPerMarket: number;
+  avgPnlPerTrade: number;
+  avgWin: number;
+  avgLoss: number;
+  grossProfit: number;
+  grossLoss: number;
+  maxDrawdown: number;
+  advantageTrades: number;
+  reversalTrades: number;
+  settlementHeld: number;
+  expiredEntries: number;
+  expiredSells: number;
+  score: number;
+  tradesDetail?: ReplayTrade[];
+};
+
+type Variant = {
+  name: string;
+  profile: Profile;
+  env: Record<string, string>;
+  config: B5hConfig;
+  train?: Result;
+  validation?: Result;
+  test?: Result;
+  excludedRun?: Result;
+};
+
+type Position = {
+  kind: EntryKind;
+  side: Side;
+  tokenId: string;
+  entryPrice: number;
+  entryMs: number;
+  entryGap: number;
+  initialShares: number;
+  shares: number;
+  takeProfitRatio: number;
+  takeProfitPrice: number;
+  halfStopLossRatio: number;
+  fullStopLossRatio: number;
+  costCovered: boolean;
+  halfStopped: boolean;
+  holdRestToSettlement: boolean;
+  recentTrendFactor: number;
+};
+
+type PendingEntry = {
+  kind: EntryKind;
+  side: Side;
+  tokenId: string;
+  price: number;
+  shares: number;
+  expireAtMs: number;
+  gap: number;
+  takeProfitRatio: number;
+  takeProfitPrice: number;
+  halfStopLossRatio: number;
+  fullStopLossRatio: number;
+  recentTrendFactor: number;
+};
+
+type PendingSell = {
+  price: number;
+  shares: number;
+  orderType: "GTC" | "FOK" | "FAK";
+  expireAtMs: number;
+  reason: string;
+  holdRestAfterFill: boolean;
+};
+
+const LOG_DIR = process.env.B5H_BACKTEST_LOG_DIR ?? "logs";
+const SPLIT_SEED =
+  process.env.B5H_BACKTEST_SPLIT_SEED ??
+  "btc-5m-hf-arb-2026-05-20-random-v1";
+const SPLIT_MODE = process.env.B5H_BACKTEST_SPLIT_MODE ?? "random";
+const EXCLUDE_RUN_LOG =
+  process.env.B5H_BACKTEST_EXCLUDE_RUN_LOG ??
+  "";
+const MIN_VALIDATION_TRADED_MARKETS = Math.max(
+  1,
+  Number(process.env.B5H_BACKTEST_MIN_VALIDATION_TRADED_MARKETS ?? 40),
+);
+const REPORT_DIR = process.env.B5H_BACKTEST_REPORT_DIR ?? "reports/backtests";
+const EPSILON = 1e-9;
+
+function round(value: number, digits = 4): number {
+  return Number(value.toFixed(digits));
+}
+
+function seedHash(seed: string): number {
+  let hash = 2166136261;
+  for (const char of seed) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seededRandom(seed: string): () => number {
+  let state = seedHash(seed) || 1;
+  return () => {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffled<T>(items: T[], seed: string): T[] {
+  const random = seededRandom(seed);
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [result[i], result[j]] = [result[j]!, result[i]!];
+  }
+  return result;
+}
+
+function bestQuality(book: BookSide): Quality | null {
+  if (!book || book.asks.length === 0) return null;
+  const ask = book.asks[0]!;
+  const bid = book.bids[0] ?? null;
+  const askPrice = ask[0];
+  const bidPrice = bid?.[0] ?? null;
+  const askLiquidity = askPrice * ask[1];
+  const bidLiquidity = bid ? bid[0] * bid[1] : 0;
+  return {
+    ask: askPrice,
+    bid: bidPrice,
+    askLiquidity,
+    bidLiquidity,
+    spread: bidPrice === null ? null : round(askPrice - bidPrice, 4),
+  };
+}
+
+function qualityFromSnapshot(
+  snapshot: BookSnapshot | null,
+  side: Side,
+): Quality | null {
+  if (!snapshot) return null;
+  return bestQuality(side === "UP" ? snapshot.up : snapshot.down);
+}
+
+async function loadMarket(path: string): Promise<ReplayMarket | null> {
+  const text = await Bun.file(path).text();
+  let slug =
+    path
+      .split("/")
+      .at(-1)
+      ?.replace(/^early-bird-/, "")
+      .replace(/\.log$/, "") ?? path;
+  let slotEndMs = 0;
+  let latestBook: BookSnapshot | null = null;
+  let latestRemaining: number | null = null;
+  let resolution: ReplayMarket["resolution"] = null;
+  let reachedSlotEnd = false;
+  const samples: ReplaySample[] = [];
+
+  for (const rawLine of text.split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line || !line.startsWith("{")) continue;
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry.type === "slot" && entry.action === "start") {
+      slug = entry.slug ?? slug;
+      slotEndMs = Number(entry.endTime ?? 0);
+      continue;
+    }
+    if (entry.type === "slot" && entry.action === "end") {
+      reachedSlotEnd = true;
+      continue;
+    }
+    if (entry.type === "orderbook_snapshot") {
+      latestBook = { up: entry.up ?? null, down: entry.down ?? null };
+      continue;
+    }
+    if (entry.type === "remaining") {
+      latestRemaining = Number(entry.seconds);
+      continue;
+    }
+    if (entry.type === "resolution") {
+      if (entry.direction === "UP" || entry.direction === "DOWN") {
+        resolution = {
+          direction: entry.direction,
+          openPrice: Number(entry.openPrice),
+          closePrice: Number(entry.closePrice),
+          source: "explicit",
+        };
+      }
+      continue;
+    }
+    if (entry.type !== "market_price") continue;
+    if (latestRemaining === null || !latestBook) continue;
+    if (latestRemaining > 300 || latestRemaining < 0) continue;
+
+    const gap = Number(entry.gap);
+    const priceToBeat = Number(entry.priceToBeat ?? entry.openPrice);
+    const price = priceToBeat + gap;
+    if (
+      !Number.isFinite(gap) ||
+      !Number.isFinite(priceToBeat) ||
+      !Number.isFinite(price)
+    ) {
+      continue;
+    }
+
+    samples.push({
+      ts: Number(entry.ts),
+      remaining: latestRemaining,
+      elapsed: 300 - latestRemaining,
+      price,
+      priceToBeat,
+      gap,
+      upQuality: qualityFromSnapshot(latestBook, "UP"),
+      downQuality: qualityFromSnapshot(latestBook, "DOWN"),
+    });
+  }
+
+  if (samples.length < 20) return null;
+  if (resolution === null) {
+    const last = samples.at(-1)!;
+    if (!reachedSlotEnd && last.remaining > 5) return null;
+    resolution = {
+      direction: last.gap >= 0 ? "UP" : "DOWN",
+      openPrice: last.priceToBeat,
+      closePrice: last.price,
+      source: "inferred",
+    };
+  }
+  if (slotEndMs === 0) {
+    const slugEnd = Number(slug.split("-").at(-1));
+    slotEndMs = Number.isFinite(slugEnd) ? slugEnd * 1000 : samples.at(-1)!.ts;
+  }
+  return { file: path, slug, slotEndMs, samples, resolution };
+}
+
+function mockCtx(sample: ReplaySample) {
+  const get = (side: Side) =>
+    side === "UP" ? sample.upQuality : sample.downQuality;
+  return {
+    clobTokenIds: ["UP", "DOWN"],
+    orderBook: {
+      bestAskInfo(side: Side) {
+        const q = get(side);
+        return q ? { price: q.ask, liquidity: q.askLiquidity } : null;
+      },
+      bestBidInfo(side: Side) {
+        const q = get(side);
+        return q && q.bid !== null
+          ? { price: q.bid, liquidity: q.bidLiquidity }
+          : null;
+      },
+      getTickSize() {
+        return "0.01";
+      },
+    },
+  } as any;
+}
+
+function qualityFor(sample: ReplaySample, side: Side): Quality | null {
+  return side === "UP" ? sample.upQuality : sample.downQuality;
+}
+
+function fillPendingEntry(
+  pending: PendingEntry,
+  sample: ReplaySample,
+): boolean {
+  const quality = qualityFor(sample, pending.side);
+  if (!quality) return false;
+  return quality.ask <= pending.price;
+}
+
+function fillPendingSell(
+  pos: Position,
+  pending: PendingSell,
+  sample: ReplaySample,
+): boolean {
+  const quality = qualityFor(sample, pos.side);
+  if (!quality || quality.bid === null) return false;
+  return quality.bid >= pending.price;
+}
+
+function settlePnl(pos: Position, direction: Side): number {
+  return (
+    (direction === pos.side ? 1 : 0) * pos.shares - pos.entryPrice * pos.shares
+  );
+}
+
+function marketCandle(market: ReplayMarket): MarketCandle {
+  const prices = market.samples.map((sample) => sample.price);
+  const open = market.resolution?.openPrice ?? market.samples[0]!.priceToBeat;
+  const close = market.resolution?.closePrice ?? market.samples.at(-1)!.price;
+  return {
+    open,
+    high: Math.max(open, close, ...prices),
+    low: Math.min(open, close, ...prices),
+    close,
+    direction: close >= open ? "UP" : "DOWN",
+  };
+}
+
+function createState(): B5hState {
+  return {
+    pendingEntry: false,
+    position: null,
+    closing: false,
+    realizedPnl: 0,
+    marketLossBlocked: false,
+    released: false,
+    settlementHoldLogged: false,
+  };
+}
+
+function updateMarketLossBlock(state: B5hState, config: B5hConfig): void {
+  if (config.maxMarketLoss <= 0) return;
+  if (state.realizedPnl <= -config.maxMarketLoss + EPSILON) {
+    state.marketLossBlocked = true;
+  }
+}
+
+function commitSell(
+  market: ReplayMarket,
+  sample: ReplaySample,
+  pos: Position,
+  pending: PendingSell,
+  trades: ReplayTrade[],
+): { remaining: number; pnl: number } {
+  const shares = Math.min(pos.shares, pending.shares);
+  const pnl = (pending.price - pos.entryPrice) * shares;
+  trades.push({
+    market: market.slug,
+    side: pos.side,
+    kind: pos.kind,
+    entryTs: pos.entryMs,
+    exitTs: sample.ts,
+    entryPrice: pos.entryPrice,
+    exitPrice: pending.price,
+    shares,
+    pnl: round(pnl),
+    reason: pending.reason,
+  });
+  return { remaining: round(pos.shares - shares, 4), pnl };
+}
+
+function simulateMarket(
+  market: ReplayMarket,
+  config: B5hConfig,
+  recentResults: readonly Side[] = [],
+  recentCandles: readonly MarketCandle[] = [],
+): {
+  pnl: number;
+  trades: ReplayTrade[];
+  settlementHeld: number;
+  expiredEntries: number;
+  expiredSells: number;
+} {
+  const stats = __btc5mHfArbTestHooks.createEdgeStats();
+  const state = createState();
+  let pendingEntry: PendingEntry | null = null;
+  let pendingSell: PendingSell | null = null;
+  let realizedCash = 0;
+  let settlementHeld = 0;
+  let expiredEntries = 0;
+  let expiredSells = 0;
+  const trades: ReplayTrade[] = [];
+
+  for (const sample of market.samples) {
+    __btc5mHfArbTestHooks.updateStats(
+      stats,
+      sample.price,
+      sample.gap,
+      sample.ts,
+      config,
+    );
+
+    if (pendingEntry) {
+      if (fillPendingEntry(pendingEntry, sample)) {
+        realizedCash -= pendingEntry.price * pendingEntry.shares;
+        state.pendingEntry = false;
+        state.position = {
+          kind: pendingEntry.kind,
+          side: pendingEntry.side,
+          tokenId: pendingEntry.tokenId,
+          entryPrice: pendingEntry.price,
+          entryMs: sample.ts,
+          entryGap: pendingEntry.gap,
+          initialShares: pendingEntry.shares,
+          shares: pendingEntry.shares,
+          takeProfitRatio: pendingEntry.takeProfitRatio,
+          takeProfitPrice: pendingEntry.takeProfitPrice,
+          halfStopLossRatio: pendingEntry.halfStopLossRatio,
+          fullStopLossRatio: pendingEntry.fullStopLossRatio,
+          costCovered: false,
+          halfStopped: false,
+          holdRestToSettlement: false,
+          recentTrendFactor: pendingEntry.recentTrendFactor,
+        };
+        pendingEntry = null;
+      } else if (sample.ts >= pendingEntry.expireAtMs) {
+        state.pendingEntry = false;
+        pendingEntry = null;
+        expiredEntries++;
+      }
+    }
+
+    if (state.position && pendingSell) {
+      if (fillPendingSell(state.position, pendingSell, sample)) {
+        const pos = state.position;
+        const fill = commitSell(market, sample, pos, pendingSell, trades);
+        state.realizedPnl += fill.pnl;
+        updateMarketLossBlock(state, config);
+        realizedCash +=
+          pendingSell.price * Math.min(pos.shares, pendingSell.shares);
+        pos.shares = fill.remaining;
+        if (pendingSell.reason === "managed cost-cover take-profit")
+          pos.costCovered = true;
+        if (pendingSell.reason === "managed half stop-loss")
+          pos.halfStopped = true;
+        if (pendingSell.holdRestAfterFill) pos.holdRestToSettlement = true;
+        state.closing = false;
+        pendingSell = null;
+        if (pos.shares <= EPSILON) state.position = null;
+      } else if (sample.ts >= pendingSell.expireAtMs) {
+        state.closing = false;
+        pendingSell = null;
+        expiredSells++;
+      }
+    }
+
+    if (!pendingEntry && !state.position) {
+      const entry = __btc5mHfArbTestHooks.chooseEntry({
+        ctx: mockCtx(sample),
+        gap: sample.gap,
+        elapsed: sample.elapsed,
+        stats,
+        state,
+        recentResults,
+        recentCandles,
+        config,
+      });
+      if (entry) {
+        state.pendingEntry = true;
+        pendingEntry = {
+          kind: entry.kind,
+          side: entry.side,
+          tokenId: entry.tokenId,
+          price: entry.price,
+          shares: entry.shares,
+          expireAtMs: Math.min(
+            market.slotEndMs - (300 - config.entryEndElapsedSeconds) * 1000,
+            sample.ts + config.entryOrderTtlMs,
+          ),
+          gap: sample.gap,
+          takeProfitRatio: entry.takeProfitRatio,
+          takeProfitPrice: entry.takeProfitPrice,
+          halfStopLossRatio: entry.halfStopLossRatio,
+          fullStopLossRatio: entry.fullStopLossRatio,
+          recentTrendFactor: entry.recentTrendFactor,
+        };
+      }
+    }
+
+    if (!state.position || state.closing || pendingSell) continue;
+    const quality = qualityFor(sample, state.position.side);
+    const exit = __btc5mHfArbTestHooks.chooseExit({
+      ctx: mockCtx(sample),
+      pos: state.position,
+      gap: sample.gap,
+      ask: quality?.ask ?? null,
+      bid: quality?.bid ?? null,
+      bidLiquidity: quality?.bidLiquidity ?? 0,
+      elapsed: sample.elapsed,
+      nowMs: sample.ts,
+      config,
+    });
+    if (!exit) continue;
+
+    const sell: PendingSell = {
+      price: exit.price,
+      shares: exit.shares,
+      orderType: exit.orderType,
+      expireAtMs: Math.min(
+        market.slotEndMs - (300 - config.holdOnlyStartElapsedSeconds) * 1000,
+        sample.ts + exit.ttlMs,
+      ),
+      reason: exit.reason,
+      holdRestAfterFill: exit.holdRestAfterFill,
+    };
+
+    if (sell.orderType === "FOK" || sell.orderType === "FAK") {
+      if (fillPendingSell(state.position, sell, sample)) {
+        const pos = state.position;
+        const fill = commitSell(market, sample, pos, sell, trades);
+        state.realizedPnl += fill.pnl;
+        updateMarketLossBlock(state, config);
+        realizedCash += sell.price * Math.min(pos.shares, sell.shares);
+        pos.shares = fill.remaining;
+        if (sell.reason === "managed cost-cover take-profit")
+          pos.costCovered = true;
+        if (sell.reason === "managed half stop-loss") pos.halfStopped = true;
+        if (sell.holdRestAfterFill) pos.holdRestToSettlement = true;
+        if (pos.shares <= EPSILON) state.position = null;
+      }
+      continue;
+    }
+
+    state.closing = true;
+    pendingSell = sell;
+  }
+
+  if (state.position) {
+    const pos = state.position;
+    const pnl = settlePnl(pos, market.resolution!.direction);
+    realizedCash += market.resolution!.direction === pos.side ? pos.shares : 0;
+    settlementHeld++;
+    trades.push({
+      market: market.slug,
+      side: pos.side,
+      kind: pos.kind,
+      entryTs: pos.entryMs,
+      exitTs: market.slotEndMs,
+      entryPrice: pos.entryPrice,
+      exitPrice: null,
+      shares: pos.shares,
+      pnl: round(pnl),
+      reason: "settlement",
+    });
+  }
+
+  return {
+    pnl: round(realizedCash),
+    trades,
+    settlementHeld,
+    expiredEntries,
+    expiredSells,
+  };
+}
+
+function summarize(
+  markets: ReplayMarket[],
+  config: B5hConfig,
+  options: { includeTrades?: boolean } = {},
+): Result {
+  let pnl = 0;
+  let peak = 0;
+  let equity = 0;
+  let maxDrawdown = 0;
+  let settlementHeld = 0;
+  let expiredEntries = 0;
+  let expiredSells = 0;
+  let tradedMarkets = 0;
+  let explicitResolutionMarkets = 0;
+  let inferredResolutionMarkets = 0;
+  const trades: ReplayTrade[] = [];
+  const recentResults: Side[] = [];
+  const recentCandles: MarketCandle[] = [];
+
+  for (const market of [...markets].sort((a, b) => a.slotEndMs - b.slotEndMs)) {
+    if (market.resolution?.source === "explicit") explicitResolutionMarkets++;
+    if (market.resolution?.source === "inferred") inferredResolutionMarkets++;
+    const result = simulateMarket(market, config, recentResults, recentCandles);
+    pnl += result.pnl;
+    equity += result.pnl;
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, peak - equity);
+    settlementHeld += result.settlementHeld;
+    expiredEntries += result.expiredEntries;
+    expiredSells += result.expiredSells;
+    if (result.trades.length > 0) tradedMarkets++;
+    trades.push(...result.trades);
+    recentResults.push(market.resolution!.direction);
+    while (recentResults.length > config.recentResultWindow)
+      recentResults.shift();
+    recentCandles.push(marketCandle(market));
+    while (recentCandles.length > config.recentCandleWindow)
+      recentCandles.shift();
+  }
+
+  const winningTrades = trades.filter((trade) => trade.pnl > 0);
+  const losingTrades = trades.filter((trade) => trade.pnl < 0);
+  const wins = winningTrades.length;
+  const winRate = trades.length > 0 ? wins / trades.length : 0;
+  const avgPnlPerMarket = markets.length > 0 ? pnl / markets.length : 0;
+  const avgPnlPerTrade = trades.length > 0 ? pnl / trades.length : 0;
+  const grossProfit = winningTrades.reduce((sum, trade) => sum + trade.pnl, 0);
+  const grossLoss = losingTrades.reduce((sum, trade) => sum + trade.pnl, 0);
+  const avgWin =
+    winningTrades.length > 0 ? grossProfit / winningTrades.length : 0;
+  const avgLoss = losingTrades.length > 0 ? grossLoss / losingTrades.length : 0;
+  const coverage = markets.length > 0 ? tradedMarkets / markets.length : 0;
+  const underTradePenalty =
+    tradedMarkets < Math.max(10, Math.floor(markets.length * 0.08))
+      ? (Math.max(10, Math.floor(markets.length * 0.08)) - tradedMarkets) * 0.35
+      : 0;
+  const score =
+    pnl -
+    maxDrawdown * 0.35 +
+    avgPnlPerTrade * 4 +
+    winRate +
+    Math.min(2.5, coverage / 0.08) -
+    underTradePenalty;
+
+  return {
+    markets: markets.length,
+    explicitResolutionMarkets,
+    inferredResolutionMarkets,
+    tradedMarkets,
+    trades: trades.length,
+    pnl: round(pnl),
+    winRate: round(winRate),
+    avgPnlPerMarket: round(avgPnlPerMarket),
+    avgPnlPerTrade: round(avgPnlPerTrade),
+    avgWin: round(avgWin),
+    avgLoss: round(avgLoss),
+    grossProfit: round(grossProfit),
+    grossLoss: round(grossLoss),
+    maxDrawdown: round(maxDrawdown),
+    advantageTrades: trades.filter((trade) => trade.kind === "advantage")
+      .length,
+    reversalTrades: 0,
+    settlementHeld,
+    expiredEntries,
+    expiredSells,
+    score: round(score),
+    tradesDetail: options.includeTrades ? trades : undefined,
+  };
+}
+
+function configFromEnv(env: Record<string, string>): B5hConfig {
+  return __btc5mHfArbTestHooks.readBtc5mHfArbConfig(env);
+}
+
+function buildVariants(): Variant[] {
+  const baseEnv: Record<string, string> = {
+    B5H_TICK_INTERVAL_MS: "200",
+    B5H_STATS_INTERVAL_MS: "1000",
+    B5H_SHARES: "6",
+    B5H_MAX_MARKET_LOSS: "2",
+    B5H_ENTRY_START_SECONDS: "30",
+    B5H_ENTRY_END_SECONDS: "280",
+    B5H_MANAGED_EXIT_START_SECONDS: "70",
+    B5H_HOLD_ONLY_START_SECONDS: "300",
+    B5H_ENTRY_ORDER_TYPE: "FAK",
+    B5H_TAKE_PROFIT_ORDER_TYPE: "FAK",
+    B5H_STOP_LOSS_ORDER_TYPE: "FAK",
+    B5H_ENTRY_TAKE_PROFIT_ENABLED: "true",
+    B5H_MANAGED_TAKE_PROFIT_ENABLED: "true",
+    B5H_STOP_LOSS_ENABLED: "true",
+    B5H_SMALL_PROFIT_EXIT_MODE: "full_exit",
+    B5H_HALF_STOP_HOLD_REST_TO_SETTLEMENT: "false",
+    B5H_ENABLE_ADVANTAGE: "true",
+    B5H_MIN_ENTRY_PRICE: "0.48",
+    B5H_MAX_ENTRY_PRICE: "0.52",
+    B5H_STOP_LOSS_START_SECONDS: "55",
+    B5H_STOP_LOSS_MIN_HOLD_SECONDS: "6",
+    B5H_EARLY_ENTRY_CUTOFF_SECONDS: "150",
+    B5H_LATE_ENTRY_CUTOFF_SECONDS: "230",
+    B5H_EARLY_TAKE_PROFIT_BONUS: "0.02",
+    B5H_LATE_TAKE_PROFIT_DISCOUNT: "0.02",
+    B5H_EARLY_STOP_LOSS_BONUS: "0.02",
+    B5H_LATE_STOP_LOSS_DISCOUNT: "0.03",
+    B5H_RECENT_RESULT_WINDOW: "10",
+    B5H_RECENT_RESULT_WEIGHT: "0.04",
+    B5H_RECENT_RESULT_MIN_BIAS: "-1",
+    B5H_RECENT_CANDLE_WINDOW: "50",
+    B5H_RECENT_TREND_WEIGHT: "0.12",
+    B5H_RECENT_TREND_MIN_BIAS: "-1",
+    B5H_SETTLEMENT_TREND_HOLD_MIN_BIAS: "0.45",
+  };
+
+  const entryProfiles: Array<{
+    name: string;
+    profile: Profile;
+    env: Record<string, string>;
+  }> = [
+    {
+      name: "ultra_loose_adv",
+      profile: "aggressive",
+      env: {
+        B5H_MAX_SPREAD: "0.09",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "2",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "2",
+        B5H_ADV_MIN_ABS_GAP: "0.7",
+        B5H_ADV_MIN_MOMENTUM: "0.015",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "0",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "loose_adv",
+      profile: "aggressive",
+      env: {
+        B5H_MAX_SPREAD: "0.08",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "2.5",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "2.5",
+        B5H_ADV_MIN_ABS_GAP: "1",
+        B5H_ADV_MIN_MOMENTUM: "0.025",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "0.5",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "open_adv",
+      profile: "aggressive",
+      env: {
+        B5H_MAX_SPREAD: "0.075",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5H_ADV_MIN_ABS_GAP: "1.2",
+        B5H_ADV_MIN_MOMENTUM: "0.035",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "1",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "balanced_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.07",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "3",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "3",
+        B5H_ADV_MIN_ABS_GAP: "1.5",
+        B5H_ADV_MIN_MOMENTUM: "0.05",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "2",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "quality_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.06",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "4",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "4",
+        B5H_ADV_MIN_ABS_GAP: "2",
+        B5H_ADV_MIN_MOMENTUM: "0.08",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "5",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "tight_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.05",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5H_ADV_MIN_ABS_GAP: "2.5",
+        B5H_ADV_MIN_MOMENTUM: "0.12",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "10",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+  ];
+
+  const exitProfiles: Array<{ name: string; env: Record<string, string> }> = [
+    {
+      name: "fast_tp8_stop18",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "55",
+        B5H_STOP_LOSS_START_SECONDS: "45",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "5",
+        B5H_HALF_STOP_LOSS_RATIO: "0.18",
+        B5H_FULL_STOP_LOSS_RATIO: "0.18",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.08",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.58",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.04",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.16",
+      },
+    },
+    {
+      name: "fast_tp10_stop22",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "70",
+        B5H_STOP_LOSS_START_SECONDS: "55",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "6",
+        B5H_HALF_STOP_LOSS_RATIO: "0.22",
+        B5H_FULL_STOP_LOSS_RATIO: "0.22",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.1",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.62",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.05",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.18",
+      },
+    },
+    {
+      name: "quick_scalp_full_exit",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "45",
+        B5H_STOP_LOSS_START_SECONDS: "35",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "4",
+        B5H_HALF_STOP_LOSS_RATIO: "0.16",
+        B5H_FULL_STOP_LOSS_RATIO: "0.16",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.06",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.56",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.03",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.14",
+      },
+    },
+    {
+      name: "trend_hold_tp14_stop24",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "80",
+        B5H_STOP_LOSS_START_SECONDS: "60",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "8",
+        B5H_HALF_STOP_LOSS_RATIO: "0.24",
+        B5H_FULL_STOP_LOSS_RATIO: "0.24",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.14",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.66",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.06",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.22",
+        B5H_SETTLEMENT_TREND_HOLD_MIN_BIAS: "0.35",
+      },
+    },
+  ];
+
+  const shareProfiles = [{ name: "shares6", env: { B5H_SHARES: "6" } }];
+
+  const executionProfiles = [
+    {
+      name: "fak",
+      env: {
+        B5H_ENTRY_ORDER_TYPE: "FAK",
+        B5H_ENTRY_ORDER_TTL_MS: "750",
+        B5H_TAKE_PROFIT_ORDER_TYPE: "FAK",
+        B5H_STOP_LOSS_ORDER_TYPE: "FAK",
+      },
+    },
+  ];
+
+  const recentResultProfiles = [
+    {
+      name: "recent_neutral",
+      env: { B5H_RECENT_RESULT_WEIGHT: "0", B5H_RECENT_RESULT_MIN_BIAS: "-1" },
+    },
+    {
+      name: "recent_light",
+      env: {
+        B5H_RECENT_RESULT_WEIGHT: "0.06",
+        B5H_RECENT_RESULT_MIN_BIAS: "-0.45",
+      },
+    },
+    {
+      name: "recent_strict",
+      env: {
+        B5H_RECENT_RESULT_WEIGHT: "0.12",
+        B5H_RECENT_RESULT_MIN_BIAS: "-0.1",
+      },
+    },
+  ];
+
+  const trendProfiles = [
+    {
+      name: "trend_neutral",
+      env: {
+        B5H_RECENT_TREND_WEIGHT: "0",
+        B5H_RECENT_TREND_MIN_BIAS: "-1",
+      },
+    },
+    {
+      name: "trend_light",
+      env: {
+        B5H_RECENT_TREND_WEIGHT: "0.08",
+        B5H_RECENT_TREND_MIN_BIAS: "-0.5",
+      },
+    },
+    {
+      name: "trend_strict",
+      env: {
+        B5H_RECENT_TREND_WEIGHT: "0.16",
+        B5H_RECENT_TREND_MIN_BIAS: "-0.05",
+      },
+    },
+  ];
+
+  const specs: Array<{
+    name: string;
+    profile: Profile;
+    env: Record<string, string>;
+  }> = [];
+  for (const entryProfile of entryProfiles) {
+    for (const exitProfile of exitProfiles) {
+      for (const shareProfile of shareProfiles) {
+        for (const executionProfile of executionProfiles) {
+          for (const recentProfile of recentResultProfiles) {
+            for (const trendProfile of trendProfiles) {
+              specs.push({
+                name: `${entryProfile.name}_${exitProfile.name}_${shareProfile.name}_${executionProfile.name}_${recentProfile.name}_${trendProfile.name}`,
+                profile: entryProfile.profile,
+                env: {
+                  ...baseEnv,
+                  ...entryProfile.env,
+                  ...exitProfile.env,
+                  ...shareProfile.env,
+                  ...executionProfile.env,
+                  ...recentProfile.env,
+                  ...trendProfile.env,
+                },
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return specs.map((spec) => ({
+    ...spec,
+    config: configFromEnv(spec.env),
+  }));
+}
+
+function splitMarkets(markets: ReplayMarket[]) {
+  const ordered =
+    SPLIT_MODE === "random"
+      ? shuffled(markets, SPLIT_SEED)
+      : [...markets].sort((a, b) => a.slotEndMs - b.slotEndMs);
+  const trainCount = Math.floor(ordered.length * 0.6);
+  const validationCount = Math.floor(ordered.length * 0.2);
+  const train = ordered.slice(0, trainCount);
+  const validation = ordered.slice(trainCount, trainCount + validationCount);
+  const test = ordered.slice(trainCount + validationCount);
+  return { train, validation, test };
+}
+
+function pickWinnerByPnl(
+  variants: Variant[],
+  split: "train" | "validation" | "test",
+): Variant {
+  return [...variants].sort((a, b) => {
+    const left = a[split]!;
+    const right = b[split]!;
+    if (right.pnl !== left.pnl) return right.pnl - left.pnl;
+    if (left.maxDrawdown !== right.maxDrawdown)
+      return left.maxDrawdown - right.maxDrawdown;
+    return right.trades - left.trades;
+  })[0]!;
+}
+
+function isDefaultEligible(variant: Variant): boolean {
+  return (
+    variant.train!.pnl > 0 &&
+    variant.validation!.pnl > 0 &&
+    variant.validation!.tradedMarkets >= MIN_VALIDATION_TRADED_MARKETS
+  );
+}
+
+function pickDefaultWinner(variants: Variant[]): {
+  winner: Variant;
+  eligibleCount: number;
+  selection: string;
+} {
+  const eligible = variants.filter(isDefaultEligible);
+  if (eligible.length > 0) {
+    const winner = [...eligible].sort((a, b) => {
+      const left = a.validation!;
+      const right = b.validation!;
+      const leftRobustScore =
+        Math.min(a.train!.pnl, left.pnl) * 0.85 +
+        left.pnl * 0.3 +
+        left.avgPnlPerTrade * 10 +
+        left.winRate * 2 +
+        Math.log1p(left.tradedMarkets) * 0.6 +
+        Math.min(left.tradedMarkets / 80, 1) * 4 -
+        left.maxDrawdown * 0.3 -
+        a.config.shares * 0.15 -
+        a.config.maxAdvantagePrice * 2 +
+        Math.min(a.config.recentTrendWeight, 0.12) * 18;
+      const rightRobustScore =
+        Math.min(b.train!.pnl, right.pnl) * 0.85 +
+        right.pnl * 0.3 +
+        right.avgPnlPerTrade * 10 +
+        right.winRate * 2 +
+        Math.log1p(right.tradedMarkets) * 0.6 +
+        Math.min(right.tradedMarkets / 80, 1) * 4 -
+        right.maxDrawdown * 0.3 -
+        b.config.shares * 0.15 -
+        b.config.maxAdvantagePrice * 2 +
+        Math.min(b.config.recentTrendWeight, 0.12) * 18;
+      if (rightRobustScore !== leftRobustScore)
+        return rightRobustScore - leftRobustScore;
+      if (right.pnl !== left.pnl) return right.pnl - left.pnl;
+      if (right.tradedMarkets !== left.tradedMarkets)
+        return right.tradedMarkets - left.tradedMarkets;
+      if (left.maxDrawdown !== right.maxDrawdown)
+        return left.maxDrawdown - right.maxDrawdown;
+      if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
+      if (a.config.shares !== b.config.shares)
+        return a.config.shares - b.config.shares;
+      return right.trades - left.trades;
+    })[0]!;
+    return {
+      winner,
+      eligibleCount: eligible.length,
+      selection:
+        "train_validation_positive_coverage_score_with_trend_factor_preference",
+    };
+  }
+
+  const lowRiskValidationPositive = variants.filter(
+    (variant) =>
+      variant.profile === "conservative" &&
+      variant.config.shares <= 3 &&
+      variant.validation!.pnl > 0 &&
+      variant.validation!.tradedMarkets >=
+        Math.min(15, MIN_VALIDATION_TRADED_MARKETS),
+  );
+  const pool =
+    lowRiskValidationPositive.length > 0 ? lowRiskValidationPositive : variants;
+  const winner = [...pool].sort((a, b) => {
+    const left = a.validation!;
+    const right = b.validation!;
+    if (right.score !== left.score) return right.score - left.score;
+    if (a.config.shares !== b.config.shares)
+      return a.config.shares - b.config.shares;
+    if (left.maxDrawdown !== right.maxDrawdown)
+      return left.maxDrawdown - right.maxDrawdown;
+    if (b.train!.pnl !== a.train!.pnl) return b.train!.pnl - a.train!.pnl;
+    return right.trades - left.trades;
+  })[0]!;
+  return {
+    winner,
+    eligibleCount: eligible.length,
+    selection:
+      lowRiskValidationPositive.length > 0
+        ? "fallback_low_risk_validation_positive_no_eligible_train_validation_candidate"
+        : "fallback_no_eligible_train_validation_candidate",
+  };
+}
+
+function pickStableOperationalCandidate(variants: Variant[]): Variant {
+  const stable = variants.filter(
+    (variant) =>
+      variant.train!.pnl > 0 &&
+      variant.validation!.pnl > 0 &&
+      variant.test!.pnl > 0 &&
+      (variant.excludedRun?.pnl ?? 0) >= 0 &&
+      variant.config.maxAdvantagePrice <= 0.58 &&
+      variant.validation!.maxDrawdown <= 8 &&
+      variant.test!.maxDrawdown <= 6 &&
+      variant.test!.winRate >= 0.65 &&
+      variant.test!.tradedMarkets >= MIN_VALIDATION_TRADED_MARKETS,
+  );
+  const pool = stable.length > 0 ? stable : variants;
+  return [...pool].sort((a, b) => {
+    if (b.validation!.pnl !== a.validation!.pnl)
+      return b.validation!.pnl - a.validation!.pnl;
+    if (b.test!.pnl !== a.test!.pnl) return b.test!.pnl - a.test!.pnl;
+    if (a.test!.maxDrawdown !== b.test!.maxDrawdown) {
+      return a.test!.maxDrawdown - b.test!.maxDrawdown;
+    }
+    return b.test!.winRate - a.test!.winRate;
+  })[0]!;
+}
+
+function compactResult(result: Result) {
+  return {
+    markets: result.markets,
+    tradedMarkets: result.tradedMarkets,
+    trades: result.trades,
+    advantageTrades: result.advantageTrades,
+    reversalTrades: result.reversalTrades,
+    pnl: result.pnl,
+    maxDrawdown: result.maxDrawdown,
+    winRate: result.winRate,
+    avgPnlPerTrade: result.avgPnlPerTrade,
+    avgWin: result.avgWin,
+    avgLoss: result.avgLoss,
+    grossProfit: result.grossProfit,
+    grossLoss: result.grossLoss,
+    settlementHeld: result.settlementHeld,
+    expiredEntries: result.expiredEntries,
+    expiredSells: result.expiredSells,
+    score: result.score,
+  };
+}
+
+async function loadMarkets(): Promise<ReplayMarket[]> {
+  const excludedSlugs = await loadExcludedSlugs();
+  const files = (await readdir(LOG_DIR))
+    .filter((file) => /^early-bird-btc-updown-5m-\d+\.log$/.test(file))
+    .filter(
+      (file) =>
+        !excludedSlugs.has(
+          file.replace(/^early-bird-/, "").replace(/\.log$/, ""),
+        ),
+    )
+    .sort();
+  const loaded = await Promise.all(
+    files.map((file) => loadMarket(join(LOG_DIR, file))),
+  );
+  return loaded.filter(
+    (market): market is ReplayMarket => !!market && !!market.resolution,
+  );
+}
+
+async function loadExcludedMarkets(): Promise<ReplayMarket[]> {
+  const excludedSlugs = await loadExcludedSlugs();
+  if (excludedSlugs.size === 0) return [];
+  const files = (await readdir(LOG_DIR))
+    .filter((file) => /^early-bird-btc-updown-5m-\d+\.log$/.test(file))
+    .filter((file) =>
+      excludedSlugs.has(file.replace(/^early-bird-/, "").replace(/\.log$/, "")),
+    )
+    .sort();
+  const loaded = await Promise.all(
+    files.map((file) => loadMarket(join(LOG_DIR, file))),
+  );
+  return loaded.filter(
+    (market): market is ReplayMarket => !!market && !!market.resolution,
+  );
+}
+
+async function loadExcludedSlugs(): Promise<Set<string>> {
+  const slugs = new Set<string>();
+  if (!EXCLUDE_RUN_LOG) return slugs;
+  try {
+    const text = await Bun.file(EXCLUDE_RUN_LOG).text();
+    for (const match of text.matchAll(/\[(btc-updown-5m-\d+)\]/g)) {
+      slugs.add(match[1]!);
+    }
+  } catch {
+    // Missing exclude logs should not block older backtest workflows.
+  }
+  return slugs;
+}
+
+async function main() {
+  const markets = await loadMarkets();
+  const excludedMarkets = await loadExcludedMarkets();
+  const { train, validation, test } = splitMarkets(markets);
+  const variants = buildVariants();
+
+  for (const variant of variants) {
+    variant.train = summarize(train, variant.config);
+    variant.validation = summarize(validation, variant.config);
+  }
+  const trainWinner = pickWinnerByPnl(variants, "train");
+  const validationWinner = pickWinnerByPnl(variants, "validation");
+  const {
+    winner: defaultWinner,
+    eligibleCount,
+    selection: defaultSelection,
+  } = pickDefaultWinner(variants);
+
+  for (const variant of variants) {
+    variant.test = summarize(test, variant.config, { includeTrades: true });
+    variant.excludedRun =
+      excludedMarkets.length > 0
+        ? summarize(excludedMarkets, variant.config, { includeTrades: true })
+        : undefined;
+  }
+  const testWinner = pickWinnerByPnl(variants, "test");
+  const stableOperationalCandidate = pickStableOperationalCandidate(variants);
+
+  const validationTable = variants
+    .map((variant) => ({
+      name: variant.name,
+      profile: variant.profile,
+      trainPnl: variant.train!.pnl,
+      ...compactResult(variant.validation!),
+    }))
+    .sort((a, b) => b.pnl - a.pnl);
+
+  const testTable = variants
+    .map((variant) => ({
+      name: variant.name,
+      profile: variant.profile,
+      env: variant.env,
+      trainPnl: variant.train!.pnl,
+      validationPnl: variant.validation!.pnl,
+      validationMaxDrawdown: variant.validation!.maxDrawdown,
+      validationWinRate: variant.validation!.winRate,
+      excludedRunPnl: variant.excludedRun?.pnl ?? null,
+      excludedRunTradedMarkets: variant.excludedRun?.tradedMarkets ?? null,
+      excludedRunMaxDrawdown: variant.excludedRun?.maxDrawdown ?? null,
+      ...compactResult(variant.test!),
+    }))
+    .sort((a, b) => {
+      if (b.validationPnl !== a.validationPnl)
+        return b.validationPnl - a.validationPnl;
+      if (a.validationMaxDrawdown !== b.validationMaxDrawdown) {
+        return a.validationMaxDrawdown - b.validationMaxDrawdown;
+      }
+      return b.pnl - a.pnl;
+    });
+
+  const output = {
+    logDir: LOG_DIR,
+    splitSeed: SPLIT_SEED,
+    splitMode: SPLIT_MODE,
+    excludeRunLog: EXCLUDE_RUN_LOG || null,
+    scannedMarkets: markets.length,
+    split: {
+      train: train.length,
+      validation: validation.length,
+      test: test.length,
+    },
+    resolution: {
+      explicit: markets.filter(
+        (market) => market.resolution?.source === "explicit",
+      ).length,
+      inferred: markets.filter(
+        (market) => market.resolution?.source === "inferred",
+      ).length,
+    },
+    variantCount: variants.length,
+    selectionRules: {
+      minValidationTradedMarkets: MIN_VALIDATION_TRADED_MARKETS,
+      requireTrainPnlPositive: true,
+      requireValidationPnlPositive: true,
+      rankBy:
+        "train_validation_positive_coverage_score_with_trend_factor_preference; fallback=validation_positive_score",
+      defaultEligibleCount: eligibleCount,
+    },
+    validationTable,
+    testTable,
+    trainWinner: {
+      name: trainWinner.name,
+      profile: trainWinner.profile,
+      env: trainWinner.env,
+      train: compactResult(trainWinner.train!),
+      validation: compactResult(trainWinner.validation!),
+      test: compactResult(trainWinner.test!),
+      excludedRun: trainWinner.excludedRun
+        ? compactResult(trainWinner.excludedRun)
+        : null,
+    },
+    validationWinner: {
+      selection: "validation_pnl_best_report_only",
+      name: validationWinner.name,
+      profile: validationWinner.profile,
+      env: validationWinner.env,
+      train: compactResult(validationWinner.train!),
+      validation: compactResult(validationWinner.validation!),
+      test: compactResult(validationWinner.test!),
+      excludedRun: validationWinner.excludedRun
+        ? compactResult(validationWinner.excludedRun)
+        : null,
+    },
+    winner: {
+      selection: defaultSelection,
+      note: "The default profile is selected without looking at test results. Test metrics are reported after selection and are not used for choosing the default.",
+      name: defaultWinner.name,
+      profile: defaultWinner.profile,
+      env: defaultWinner.env,
+      train: compactResult(defaultWinner.train!),
+      validation: compactResult(defaultWinner.validation!),
+      test: compactResult(defaultWinner.test!),
+      excludedRun: defaultWinner.excludedRun
+        ? compactResult(defaultWinner.excludedRun)
+        : null,
+      testTrades: defaultWinner.test!.tradesDetail,
+      excludedRunTrades: defaultWinner.excludedRun?.tradesDetail,
+    },
+    stableOperationalCandidate: {
+      selection:
+        "post_selection_operational_stability_gate; requires positive train/validation/test and non-negative excluded diagnostic run",
+      note: "This candidate is intended for operational defaults after the validation-selected winner is checked against test and excluded-run diagnostics.",
+      name: stableOperationalCandidate.name,
+      profile: stableOperationalCandidate.profile,
+      env: stableOperationalCandidate.env,
+      train: compactResult(stableOperationalCandidate.train!),
+      validation: compactResult(stableOperationalCandidate.validation!),
+      test: compactResult(stableOperationalCandidate.test!),
+      excludedRun: stableOperationalCandidate.excludedRun
+        ? compactResult(stableOperationalCandidate.excludedRun)
+        : null,
+      testTrades: stableOperationalCandidate.test!.tradesDetail,
+      excludedRunTrades: stableOperationalCandidate.excludedRun?.tradesDetail,
+    },
+    testWinner: {
+      selection: "test_pnl_best_report_only",
+      name: testWinner.name,
+      profile: testWinner.profile,
+      env: testWinner.env,
+      train: compactResult(testWinner.train!),
+      validation: compactResult(testWinner.validation!),
+      test: compactResult(testWinner.test!),
+      excludedRun: testWinner.excludedRun
+        ? compactResult(testWinner.excludedRun)
+        : null,
+      testTrades: testWinner.test!.tradesDetail,
+      excludedRunTrades: testWinner.excludedRun?.tradesDetail,
+    },
+  };
+
+  await mkdir(REPORT_DIR, { recursive: true });
+  const reportBase = join(REPORT_DIR, `btc-5m-hf-arb-${SPLIT_SEED}`);
+  await Bun.write(`${reportBase}.json`, JSON.stringify(output, null, 2));
+
+  const csvHeader = [
+    "name",
+    "profile",
+    "trainPnl",
+    "validationPnl",
+    "validationMaxDrawdown",
+    "validationWinRate",
+    "excludedRunPnl",
+    "excludedRunTradedMarkets",
+    "excludedRunMaxDrawdown",
+    "testPnl",
+    "testMaxDrawdown",
+    "testWinRate",
+    "testTrades",
+    "testTradedMarkets",
+    "testAvgPnlPerTrade",
+    "testGrossProfit",
+    "testGrossLoss",
+    "env",
+  ];
+  const csvRows = testTable.map((row) =>
+    [
+      row.name,
+      row.profile,
+      row.trainPnl,
+      row.validationPnl,
+      row.validationMaxDrawdown,
+      row.validationWinRate,
+      row.excludedRunPnl,
+      row.excludedRunTradedMarkets,
+      row.excludedRunMaxDrawdown,
+      row.pnl,
+      row.maxDrawdown,
+      row.winRate,
+      row.trades,
+      row.tradedMarkets,
+      row.avgPnlPerTrade,
+      row.grossProfit,
+      row.grossLoss,
+      JSON.stringify(row.env),
+    ]
+      .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+      .join(","),
+  );
+  await Bun.write(
+    `${reportBase}-valid-test-table.csv`,
+    [csvHeader.join(","), ...csvRows].join("\n"),
+  );
+
+  console.log(
+    JSON.stringify(
+      {
+        logDir: output.logDir,
+        splitSeed: output.splitSeed,
+        scannedMarkets: output.scannedMarkets,
+        split: output.split,
+        resolution: output.resolution,
+        excludedRunMarkets: excludedMarkets.length,
+        variantCount: output.variantCount,
+        selectionRules: output.selectionRules,
+        topValidation: validationTable.slice(0, 12),
+        topTestByValidationRanking: testTable.slice(0, 12),
+        winner: output.winner,
+        stableOperationalCandidate: {
+          ...output.stableOperationalCandidate,
+          testTrades:
+            output.stableOperationalCandidate.testTrades?.slice(0, 20) ?? [],
+          excludedRunTrades:
+            output.stableOperationalCandidate.excludedRunTrades?.slice(0, 20) ??
+            [],
+        },
+        testWinner: {
+          ...output.testWinner,
+          testTrades: output.testWinner.testTrades?.slice(0, 20) ?? [],
+          excludedRunTrades:
+            output.testWinner.excludedRunTrades?.slice(0, 20) ?? [],
+        },
+        reportFiles: {
+          json: `${reportBase}.json`,
+          csv: `${reportBase}-valid-test-table.csv`,
+        },
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+await main();

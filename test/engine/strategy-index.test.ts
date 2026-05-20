@@ -21,4 +21,8 @@ describe("strategy registry", () => {
   test("registers btc-5m-dual-edge strategy", () => {
     expect(typeof strategies["btc-5m-dual-edge"]).toBe("function");
   });
+
+  test("registers btc-5m-hf-arb strategy", () => {
+    expect(typeof strategies["btc-5m-hf-arb"]).toBe("function");
+  });
 });
