@@ -41,9 +41,9 @@ if [[ -n "${TRADE_WINDOW_FONT_FILE:-}" && ! -f "$TRADE_WINDOW_FONT_FILE" ]]; the
   echo "Install a CJK font, for example: sudo apt-get install fonts-noto-cjk" >&2
 fi
 
-# Keep Env.get("PROD") false so the strategy's simulation-first guard does not exit.
-# The --prod CLI flag below still makes EarlyBird use the real CLOB client.
-export PROD=false
+# Keep Env.get("PROD") true so btc-5m-arb can enforce B5A_ALLOW_PROD.
+# The --prod CLI flag below makes EarlyBird use the real CLOB client.
+export PROD=true
 export FORCE_PROD=true
 export POLY_STRATEGY=btc-5m-arb
 

@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { __btc5mArbTestHooks } from "../../../engine/strategy/btc-5m-arb.ts";
 
 function mockCtx({
-  upAsk = 0.58,
-  upBid = 0.56,
+  upAsk = 0.52,
+  upBid = 0.5,
   downAsk = 0.5,
   downBid = 0.48,
   tick = "0.01",
@@ -32,10 +32,11 @@ function mockCtx({
 
 function baseState() {
   return {
-    entryOrderSubmitted: false,
     pendingEntry: false,
     position: null,
     closing: false,
+    realizedPnl: 0,
+    marketLossBlocked: false,
     released: false,
     settlementHoldLogged: false,
   };
@@ -62,6 +63,8 @@ const basePosition = {
   shares: 6,
   takeProfitRatio: 0.18,
   takeProfitPrice: 0.67,
+  halfStopLossRatio: 0.3,
+  fullStopLossRatio: 0.5,
   costCovered: false,
   halfStopped: false,
   holdRestToSettlement: false,
@@ -70,15 +73,19 @@ const basePosition = {
 describe("btc-5m-arb", () => {
   test("parses the requested timing and order-type defaults", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({});
-    expect(config.shares).toBe(4);
-    expect(config.entryStartElapsedSeconds).toBe(67);
-    expect(config.entryEndElapsedSeconds).toBe(217);
-    expect(config.managedExitStartElapsedSeconds).toBe(190);
-    expect(config.holdOnlyStartElapsedSeconds).toBe(297);
+    expect(config.shares).toBe(6);
+    expect(config.maxMarketLoss).toBe(2);
+    expect(config.entryStartElapsedSeconds).toBe(60);
+    expect(config.entryEndElapsedSeconds).toBe(280);
+    expect(config.managedExitStartElapsedSeconds).toBe(150);
+    expect(config.holdOnlyStartElapsedSeconds).toBe(300);
     expect(config.entryOrderType).toBe("FAK");
-    expect(config.takeProfitOrderType).toBe("GTC");
+    expect(config.takeProfitOrderType).toBe("FAK");
     expect(config.stopLossOrderType).toBe("FAK");
+    expect(config.minEntryPrice).toBe(0.48);
+    expect(config.maxEntryPrice).toBe(0.52);
     expect(config.maxAdvantagePrice).toBe(0.58);
+    expect(config.enableReversal).toBe(true);
     expect(config.maxSpread).toBe(0.07);
     expect(config.advantageMinAbsGap).toBe(2);
     expect(config.advantageMinMomentum).toBe(0.08);
@@ -95,16 +102,17 @@ describe("btc-5m-arb", () => {
     expect(config.stopLossEnabled).toBe(true);
     expect(config.smallProfitExitMode).toBe("full_exit");
     expect(config.halfStopHoldRestToSettlement).toBe(false);
+    expect(config.recentResultWindow).toBe(10);
   });
 
-  test("chooses an advantage entry only inside the 67-217 second window", () => {
+  test("chooses an advantage entry only inside the configured entry window", () => {
     const config = __btc5mArbTestHooks.readBtc5mArbConfig({
       B5A_ADV_MIN_ABS_GAP: "4",
       B5A_ADV_MIN_MOMENTUM: "0.2",
       B5A_ADV_MIN_CUMULATIVE_GAP: "30",
     });
     const entry = __btc5mArbTestHooks.chooseEntry({
-      ctx: mockCtx({ upAsk: 0.58, upBid: 0.56 }),
+      ctx: mockCtx({ upAsk: 0.52, upBid: 0.5 }),
       gap: 10,
       elapsed: 130,
       stats: advantageStats(),
@@ -113,14 +121,14 @@ describe("btc-5m-arb", () => {
     });
     expect(entry?.kind).toBe("advantage");
     expect(entry?.side).toBe("UP");
-    expect(entry?.price).toBe(0.58);
-    expect(entry?.shares).toBe(4);
+    expect(entry?.price).toBe(0.52);
+    expect(entry?.shares).toBe(6);
 
     expect(
       __btc5mArbTestHooks.chooseEntry({
         ctx: mockCtx(),
         gap: 10,
-        elapsed: 66,
+        elapsed: 59,
         stats: advantageStats(),
         state: baseState(),
         config,
@@ -130,7 +138,7 @@ describe("btc-5m-arb", () => {
       __btc5mArbTestHooks.chooseEntry({
         ctx: mockCtx(),
         gap: 10,
-        elapsed: 218,
+        elapsed: 281,
         stats: advantageStats(),
         state: baseState(),
         config,
@@ -138,7 +146,7 @@ describe("btc-5m-arb", () => {
     ).toBeNull();
   });
 
-  test("does not choose reversal entries even if legacy reversal env vars are set", () => {
+  test("can choose reversal entries when the opposite side has a valid price and momentum", () => {
     const entry = __btc5mArbTestHooks.chooseEntry({
       ctx: mockCtx({ downAsk: 0.51, downBid: 0.49, upAsk: 0.7 }),
       gap: 3,
@@ -148,27 +156,38 @@ describe("btc-5m-arb", () => {
         sideVelocityEma: { UP: -0.35, DOWN: 0.35 },
         gapHistory: [5, 4, 3],
         lastGap: 3,
-        cumulativeGap: 20,
+        cumulativeGap: -20,
       },
       state: baseState(),
       config: __btc5mArbTestHooks.readBtc5mArbConfig({
         B5A_ENABLE_REVERSAL: "true",
         B5A_REV_MAX_ABS_GAP: "4",
         B5A_REV_MIN_MOMENTUM: "0.2",
+        B5A_REV_MIN_CUMULATIVE_GAP: "5",
       }),
     });
-    expect(entry).toBeNull();
+    expect(entry?.kind).toBe("reversal");
+    expect(entry?.side).toBe("DOWN");
   });
 
-  test("does not submit a second entry after any entry order has been submitted", () => {
+  test("blocks new entries while an order or position is active, or after market loss limit", () => {
     const entry = __btc5mArbTestHooks.chooseEntry({
       ctx: mockCtx(),
       gap: 10,
       elapsed: 150,
       stats: advantageStats(),
-      state: { ...baseState(), entryOrderSubmitted: true },
+      state: { ...baseState(), pendingEntry: true },
     });
     expect(entry).toBeNull();
+    expect(
+      __btc5mArbTestHooks.chooseEntry({
+        ctx: mockCtx(),
+        gap: 10,
+        elapsed: 150,
+        stats: advantageStats(),
+        state: { ...baseState(), marketLossBlocked: true },
+      }),
+    ).toBeNull();
   });
 
   test("uses dynamic take-profit with a higher minimum entry-window ratio", () => {
@@ -196,11 +215,11 @@ describe("btc-5m-arb", () => {
       }),
     });
     expect(tp?.reason).toBe("dynamic take-profit");
-    expect(tp?.orderType).toBe("GTC");
+    expect(tp?.orderType).toBe("FAK");
 
     const disabledStop = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.2, upAsk: 0.22 }),
-      pos: { ...basePosition },
+      pos: { ...basePosition, fullStopLossRatio: 0.67 },
       gap: -20,
       ask: 0.22,
       bid: 0.2,
@@ -214,7 +233,7 @@ describe("btc-5m-arb", () => {
 
     const enabledStop = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.2, upAsk: 0.22 }),
-      pos: { ...basePosition },
+      pos: { ...basePosition, fullStopLossRatio: 0.67 },
       gap: -20,
       ask: 0.22,
       bid: 0.2,
@@ -306,7 +325,7 @@ describe("btc-5m-arb", () => {
   test("uses FAK for managed half and full stop-loss exits", () => {
     const half = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.27, upAsk: 0.29 }),
-      pos: { ...basePosition },
+      pos: { ...basePosition, fullStopLossRatio: 0.67 },
       gap: -12,
       ask: 0.29,
       bid: 0.27,
@@ -324,7 +343,7 @@ describe("btc-5m-arb", () => {
 
     const legacyHalf = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.27, upAsk: 0.29 }),
-      pos: { ...basePosition },
+      pos: { ...basePosition, fullStopLossRatio: 0.67 },
       gap: -12,
       ask: 0.29,
       bid: 0.27,
@@ -356,7 +375,7 @@ describe("btc-5m-arb", () => {
     expect(full?.shares).toBe(6);
   });
 
-  test("holds through settlement from second 297 onward", () => {
+  test("holds through settlement from second 300 onward", () => {
     const exit = __btc5mArbTestHooks.chooseExit({
       ctx: mockCtx({ upBid: 0.95, upAsk: 0.96 }),
       pos: { ...basePosition },
@@ -364,7 +383,7 @@ describe("btc-5m-arb", () => {
       ask: 0.96,
       bid: 0.95,
       bidLiquidity: 20,
-      elapsed: 297,
+      elapsed: 300,
     });
     expect(exit).toBeNull();
   });

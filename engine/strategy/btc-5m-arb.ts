@@ -4,15 +4,17 @@ import type { Strategy, StrategyContext, StrategyMetrics } from "./types.ts";
 import { Env } from "../../utils/config.ts";
 
 type Side = "UP" | "DOWN";
-type EntryKind = "advantage";
+type EntryKind = "advantage" | "reversal";
 type OrderType = "GTC" | "FOK" | "FAK";
 
 type Config = {
+  allowProd: boolean;
   tickIntervalMs: number;
   statsIntervalMs: number;
   velocityEmaPeriod: number;
   trendLookback: number;
   shares: number;
+  maxMarketLoss: number;
   entryStartElapsedSeconds: number;
   entryEndElapsedSeconds: number;
   managedExitStartElapsedSeconds: number;
@@ -26,13 +28,26 @@ type Config = {
   maxSpread: number;
   minEntryLiquidityUsd: number;
   minExitLiquidityUsd: number;
+  minEntryPrice: number;
+  maxEntryPrice: number;
   maxAdvantagePrice: number;
+  maxReversalPrice: number;
   enableAdvantage: boolean;
+  enableReversal: boolean;
   advantageMinAbsGap: number;
   advantageMinMomentum: number;
   advantageMinCumulativeGap: number;
+  reversalMaxAbsGap: number;
+  reversalMinMomentum: number;
+  reversalMinCumulativeGap: number;
   minTakeProfitRatio: number;
   maxTakeProfitRatio: number;
+  earlyEntryCutoffSeconds: number;
+  lateEntryCutoffSeconds: number;
+  earlyTakeProfitBonus: number;
+  lateTakeProfitDiscount: number;
+  earlyStopLossBonus: number;
+  lateStopLossDiscount: number;
   takeProfitPriceImmediate: number;
   fullTakeProfitRatio: number;
   halfStopLossRatio: number;
@@ -42,11 +57,18 @@ type Config = {
   entryTakeProfitEnabled: boolean;
   managedTakeProfitEnabled: boolean;
   stopLossEnabled: boolean;
-  smallProfitExitMode: "cost_cover_hold" | "cost_cover_continue" | "full_exit" | "none";
+  smallProfitExitMode:
+    | "cost_cover_hold"
+    | "cost_cover_continue"
+    | "full_exit"
+    | "none";
   halfStopHoldRestToSettlement: boolean;
   dynamicTpPriceWeight: number;
   dynamicTpGapWeight: number;
   dynamicTpMomentumWeight: number;
+  recentResultWindow: number;
+  recentResultWeight: number;
+  recentResultMinBias: number;
 };
 
 type EdgeStats = {
@@ -80,6 +102,9 @@ type EntryDecision = {
   cumulativeSideGap: number;
   takeProfitRatio: number;
   takeProfitPrice: number;
+  halfStopLossRatio: number;
+  fullStopLossRatio: number;
+  recentBias: number;
   score: number;
 };
 
@@ -94,16 +119,19 @@ type Position = {
   shares: number;
   takeProfitRatio: number;
   takeProfitPrice: number;
+  halfStopLossRatio: number;
+  fullStopLossRatio: number;
   costCovered: boolean;
   halfStopped: boolean;
   holdRestToSettlement: boolean;
 };
 
 type State = {
-  entryOrderSubmitted: boolean;
   pendingEntry: boolean;
   position: Position | null;
   closing: boolean;
+  realizedPnl: number;
+  marketLossBlocked: boolean;
   released: boolean;
   settlementHoldLogged: boolean;
 };
@@ -118,6 +146,7 @@ type ExitDecision = {
 };
 
 const EPSILON = 1e-9;
+const RECENT_MARKET_RESULTS: Side[] = [];
 
 function parseNumberEnv(
   env: Record<string, string | undefined>,
@@ -136,7 +165,9 @@ function parseOrderTypeEnv(
   fallback: OrderType,
 ): OrderType {
   const value = env[key]?.trim().toUpperCase();
-  return value === "GTC" || value === "FOK" || value === "FAK" ? value : fallback;
+  return value === "GTC" || value === "FOK" || value === "FAK"
+    ? value
+    : fallback;
 }
 
 function parseBooleanEnv(
@@ -183,61 +214,188 @@ export function readBtc5mArbConfig(
   env: Record<string, string | undefined> = process.env,
 ): Config {
   return {
-    tickIntervalMs: Math.max(50, parseNumberEnv(env, "B5A_TICK_INTERVAL_MS", 200)),
-    statsIntervalMs: Math.max(250, parseNumberEnv(env, "B5A_STATS_INTERVAL_MS", 1000)),
-    velocityEmaPeriod: Math.max(2, parseNumberEnv(env, "B5A_VELOCITY_EMA_PERIOD", 5)),
-    trendLookback: Math.max(3, Math.floor(parseNumberEnv(env, "B5A_TREND_LOOKBACK", 8))),
-    shares: Math.max(0.01, parseNumberEnv(env, "B5A_SHARES", 4)),
-    entryStartElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_START_SECONDS", 67)),
-    entryEndElapsedSeconds: Math.max(0, parseNumberEnv(env, "B5A_ENTRY_END_SECONDS", 217)),
+    allowProd: parseBooleanEnv(env, "B5A_ALLOW_PROD", false),
+    tickIntervalMs: Math.max(
+      50,
+      parseNumberEnv(env, "B5A_TICK_INTERVAL_MS", 200),
+    ),
+    statsIntervalMs: Math.max(
+      250,
+      parseNumberEnv(env, "B5A_STATS_INTERVAL_MS", 1000),
+    ),
+    velocityEmaPeriod: Math.max(
+      2,
+      parseNumberEnv(env, "B5A_VELOCITY_EMA_PERIOD", 5),
+    ),
+    trendLookback: Math.max(
+      3,
+      Math.floor(parseNumberEnv(env, "B5A_TREND_LOOKBACK", 8)),
+    ),
+    shares: Math.max(0.01, parseNumberEnv(env, "B5A_SHARES", 6)),
+    maxMarketLoss: Math.max(0, parseNumberEnv(env, "B5A_MAX_MARKET_LOSS", 2)),
+    entryStartElapsedSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_ENTRY_START_SECONDS", 60),
+    ),
+    entryEndElapsedSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_ENTRY_END_SECONDS", 280),
+    ),
     managedExitStartElapsedSeconds: Math.max(
       0,
-      parseNumberEnv(env, "B5A_MANAGED_EXIT_START_SECONDS", 190),
+      parseNumberEnv(env, "B5A_MANAGED_EXIT_START_SECONDS", 150),
     ),
     holdOnlyStartElapsedSeconds: Math.max(
       0,
-      parseNumberEnv(env, "B5A_HOLD_ONLY_START_SECONDS", 297),
+      parseNumberEnv(env, "B5A_HOLD_ONLY_START_SECONDS", 300),
     ),
     entryOrderType: parseOrderTypeEnv(env, "B5A_ENTRY_ORDER_TYPE", "FAK"),
-    entryOrderTtlMs: Math.max(250, parseNumberEnv(env, "B5A_ENTRY_ORDER_TTL_MS", 750)),
-    takeProfitOrderType: parseOrderTypeEnv(env, "B5A_TAKE_PROFIT_ORDER_TYPE", "GTC"),
+    entryOrderTtlMs: Math.max(
+      250,
+      parseNumberEnv(env, "B5A_ENTRY_ORDER_TTL_MS", 750),
+    ),
+    takeProfitOrderType: parseOrderTypeEnv(
+      env,
+      "B5A_TAKE_PROFIT_ORDER_TYPE",
+      "FAK",
+    ),
     takeProfitOrderTtlMs: Math.max(
       250,
       parseNumberEnv(env, "B5A_TAKE_PROFIT_ORDER_TTL_MS", 3000),
     ),
-    stopLossOrderType: parseOrderTypeEnv(env, "B5A_STOP_LOSS_ORDER_TYPE", "FAK"),
+    stopLossOrderType: parseOrderTypeEnv(
+      env,
+      "B5A_STOP_LOSS_ORDER_TYPE",
+      "FAK",
+    ),
     stopLossOrderTtlMs: Math.max(
       250,
       parseNumberEnv(env, "B5A_STOP_LOSS_ORDER_TTL_MS", 1200),
     ),
     maxSpread: Math.max(0, parseNumberEnv(env, "B5A_MAX_SPREAD", 0.07)),
-    minEntryLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_ENTRY_LIQUIDITY_USD", 3)),
-    minExitLiquidityUsd: Math.max(0, parseNumberEnv(env, "B5A_MIN_EXIT_LIQUIDITY_USD", 3)),
-    maxAdvantagePrice: clamp(parseNumberEnv(env, "B5A_MAX_ADVANTAGE_PRICE", 0.58), 0.01, 0.99),
+    minEntryLiquidityUsd: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_MIN_ENTRY_LIQUIDITY_USD", 3),
+    ),
+    minExitLiquidityUsd: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_MIN_EXIT_LIQUIDITY_USD", 3),
+    ),
+    minEntryPrice: clamp(
+      parseNumberEnv(env, "B5A_MIN_ENTRY_PRICE", 0.48),
+      0.01,
+      0.99,
+    ),
+    maxEntryPrice: clamp(
+      parseNumberEnv(env, "B5A_MAX_ENTRY_PRICE", 0.52),
+      0.01,
+      0.99,
+    ),
+    maxAdvantagePrice: clamp(
+      parseNumberEnv(env, "B5A_MAX_ADVANTAGE_PRICE", 0.58),
+      0.01,
+      0.99,
+    ),
+    maxReversalPrice: clamp(
+      parseNumberEnv(env, "B5A_MAX_REVERSAL_PRICE", 0.52),
+      0.01,
+      0.99,
+    ),
     enableAdvantage: parseBooleanEnv(env, "B5A_ENABLE_ADVANTAGE", true),
-    advantageMinAbsGap: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_ABS_GAP", 2)),
-    advantageMinMomentum: Math.max(0, parseNumberEnv(env, "B5A_ADV_MIN_MOMENTUM", 0.08)),
+    enableReversal: parseBooleanEnv(env, "B5A_ENABLE_REVERSAL", true),
+    advantageMinAbsGap: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_ADV_MIN_ABS_GAP", 2),
+    ),
+    advantageMinMomentum: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_ADV_MIN_MOMENTUM", 0.08),
+    ),
     advantageMinCumulativeGap: Math.max(
       0,
       parseNumberEnv(env, "B5A_ADV_MIN_CUMULATIVE_GAP", 5),
     ),
-    minTakeProfitRatio: Math.max(0.18, parseNumberEnv(env, "B5A_MIN_TAKE_PROFIT_RATIO", 0.24)),
-    maxTakeProfitRatio: Math.max(0.12, parseNumberEnv(env, "B5A_MAX_TAKE_PROFIT_RATIO", 0.44)),
+    reversalMaxAbsGap: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_REV_MAX_ABS_GAP", 8),
+    ),
+    reversalMinMomentum: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_REV_MIN_MOMENTUM", 0.08),
+    ),
+    reversalMinCumulativeGap: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_REV_MIN_CUMULATIVE_GAP", 5),
+    ),
+    minTakeProfitRatio: Math.max(
+      0.18,
+      parseNumberEnv(env, "B5A_MIN_TAKE_PROFIT_RATIO", 0.24),
+    ),
+    maxTakeProfitRatio: Math.max(
+      0.12,
+      parseNumberEnv(env, "B5A_MAX_TAKE_PROFIT_RATIO", 0.44),
+    ),
+    earlyEntryCutoffSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_EARLY_ENTRY_CUTOFF_SECONDS", 150),
+    ),
+    lateEntryCutoffSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_LATE_ENTRY_CUTOFF_SECONDS", 230),
+    ),
+    earlyTakeProfitBonus: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_EARLY_TAKE_PROFIT_BONUS", 0.06),
+    ),
+    lateTakeProfitDiscount: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_LATE_TAKE_PROFIT_DISCOUNT", 0.06),
+    ),
+    earlyStopLossBonus: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_EARLY_STOP_LOSS_BONUS", 0.08),
+    ),
+    lateStopLossDiscount: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_LATE_STOP_LOSS_DISCOUNT", 0.1),
+    ),
     takeProfitPriceImmediate: clamp(
       parseNumberEnv(env, "B5A_TAKE_PROFIT_PRICE_IMMEDIATE", 0.82),
       0.01,
       0.99,
     ),
-    fullTakeProfitRatio: Math.max(0, parseNumberEnv(env, "B5A_FULL_TAKE_PROFIT_RATIO", 0.28)),
-    halfStopLossRatio: clamp(parseNumberEnv(env, "B5A_HALF_STOP_LOSS_RATIO", 0.3), 0, 0.99),
-    fullStopLossRatio: clamp(parseNumberEnv(env, "B5A_FULL_STOP_LOSS_RATIO", 0.5), 0, 0.99),
+    fullTakeProfitRatio: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_FULL_TAKE_PROFIT_RATIO", 0.28),
+    ),
+    halfStopLossRatio: clamp(
+      parseNumberEnv(env, "B5A_HALF_STOP_LOSS_RATIO", 0.3),
+      0,
+      0.99,
+    ),
+    fullStopLossRatio: clamp(
+      parseNumberEnv(env, "B5A_FULL_STOP_LOSS_RATIO", 0.5),
+      0,
+      0.99,
+    ),
     stopLossStartElapsedSeconds: Math.max(
       0,
       parseNumberEnv(env, "B5A_STOP_LOSS_START_SECONDS", 150),
     ),
-    stopLossMinHoldSeconds: Math.max(0, parseNumberEnv(env, "B5A_STOP_LOSS_MIN_HOLD_SECONDS", 45)),
-    entryTakeProfitEnabled: parseBooleanEnv(env, "B5A_ENTRY_TAKE_PROFIT_ENABLED", false),
-    managedTakeProfitEnabled: parseBooleanEnv(env, "B5A_MANAGED_TAKE_PROFIT_ENABLED", true),
+    stopLossMinHoldSeconds: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_STOP_LOSS_MIN_HOLD_SECONDS", 45),
+    ),
+    entryTakeProfitEnabled: parseBooleanEnv(
+      env,
+      "B5A_ENTRY_TAKE_PROFIT_ENABLED",
+      false,
+    ),
+    managedTakeProfitEnabled: parseBooleanEnv(
+      env,
+      "B5A_MANAGED_TAKE_PROFIT_ENABLED",
+      true,
+    ),
     stopLossEnabled: parseBooleanEnv(env, "B5A_STOP_LOSS_ENABLED", true),
     smallProfitExitMode: parseSmallProfitExitModeEnv(env),
     halfStopHoldRestToSettlement: parseBooleanEnv(
@@ -245,12 +403,27 @@ export function readBtc5mArbConfig(
       "B5A_HALF_STOP_HOLD_REST_TO_SETTLEMENT",
       false,
     ),
-    dynamicTpPriceWeight: Math.max(0, parseNumberEnv(env, "B5A_DYNAMIC_TP_PRICE_WEIGHT", 0.1)),
-    dynamicTpGapWeight: Math.max(0, parseNumberEnv(env, "B5A_DYNAMIC_TP_GAP_WEIGHT", 0.08)),
+    dynamicTpPriceWeight: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_DYNAMIC_TP_PRICE_WEIGHT", 0.1),
+    ),
+    dynamicTpGapWeight: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_DYNAMIC_TP_GAP_WEIGHT", 0.08),
+    ),
     dynamicTpMomentumWeight: Math.max(
       0,
       parseNumberEnv(env, "B5A_DYNAMIC_TP_MOMENTUM_WEIGHT", 0.06),
     ),
+    recentResultWindow: Math.max(
+      0,
+      Math.floor(parseNumberEnv(env, "B5A_RECENT_RESULT_WINDOW", 10)),
+    ),
+    recentResultWeight: Math.max(
+      0,
+      parseNumberEnv(env, "B5A_RECENT_RESULT_WEIGHT", 0.08),
+    ),
+    recentResultMinBias: parseNumberEnv(env, "B5A_RECENT_RESULT_MIN_BIAS", -1),
   };
 }
 
@@ -273,6 +446,35 @@ function ema(previous: number | null, value: number, period: number): number {
 
 function sideGap(side: Side, gap: number): number {
   return side === "UP" ? gap : -gap;
+}
+
+function opposite(side: Side): Side {
+  return side === "UP" ? "DOWN" : "UP";
+}
+
+function recordRecentMarketResult(direction: Side, config = CONFIG): void {
+  if (config.recentResultWindow <= 0) return;
+  RECENT_MARKET_RESULTS.push(direction);
+  while (RECENT_MARKET_RESULTS.length > config.recentResultWindow) {
+    RECENT_MARKET_RESULTS.shift();
+  }
+}
+
+function recentResultBias(
+  side: Side,
+  recentResults: readonly Side[] = RECENT_MARKET_RESULTS,
+  config = CONFIG,
+): number {
+  if (config.recentResultWindow <= 0 || recentResults.length === 0) return 0;
+  const window = recentResults.slice(-config.recentResultWindow);
+  let weighted = 0;
+  let totalWeight = 0;
+  for (let i = 0; i < window.length; i++) {
+    const weight = i + 1;
+    weighted += window[i] === side ? weight : -weight;
+    totalWeight += weight;
+  }
+  return totalWeight > 0 ? weighted / totalWeight : 0;
 }
 
 function updateStats(
@@ -301,7 +503,8 @@ function updateStats(
 
   stats.cumulativeGap += gap;
   stats.gapHistory.push(gap);
-  if (stats.gapHistory.length > config.trendLookback + 1) stats.gapHistory.shift();
+  if (stats.gapHistory.length > config.trendLookback + 1)
+    stats.gapHistory.shift();
   stats.lastPrice = price;
   stats.lastGap = gap;
   stats.lastUpdateMs = now;
@@ -337,7 +540,8 @@ function passiveBuyPrice(params: {
   maxPrice: number;
   orderType: OrderType;
 }): number | null {
-  if (params.orderType !== "GTC") return roundPrice(Math.min(params.ask, params.maxPrice));
+  if (params.orderType !== "GTC")
+    return roundPrice(Math.min(params.ask, params.maxPrice));
   const belowAsk = params.ask - params.tick;
   const improveBid = params.bid === null ? belowAsk : params.bid + params.tick;
   const price = roundPrice(Math.min(belowAsk, improveBid, params.maxPrice));
@@ -353,25 +557,59 @@ function passiveSellPrice(params: {
   orderType: OrderType;
 }): number | null {
   if (params.orderType !== "GTC") return roundPrice(params.bid);
-  const improveAsk = params.ask === null ? params.bid + params.tick : params.ask - params.tick;
+  const improveAsk =
+    params.ask === null ? params.bid + params.tick : params.ask - params.tick;
   const price = roundPrice(Math.max(params.bid, improveAsk, params.minPrice));
   if (price <= 0) return null;
   return price;
 }
 
-function dynamicTakeProfitRatio(params: {
+function timingAdjustment(
+  elapsed: number,
+  config: Config,
+): "early" | "mid" | "late" {
+  if (elapsed <= config.earlyEntryCutoffSeconds) return "early";
+  if (elapsed >= config.lateEntryCutoffSeconds) return "late";
+  return "mid";
+}
+
+function dynamicExitPlan(params: {
+  kind: EntryKind;
   price: number;
   absGap: number;
   momentum: number;
   maxPrice: number;
+  elapsed: number;
   config: Config;
-}): number {
-  const threshold = Math.max(params.config.advantageMinAbsGap, EPSILON);
-  const gapScore = clamp(params.absGap / threshold - 1, 0, 2) / 2;
-  const momentumThreshold = Math.max(params.config.advantageMinMomentum, EPSILON);
-  const momentumScore = clamp(params.momentum / momentumThreshold - 1, 0, 2) / 2;
-  const priceScore = clamp((params.maxPrice - params.price) / params.maxPrice, 0, 1);
-  return clamp(
+}): {
+  takeProfitRatio: number;
+  halfStopLossRatio: number;
+  fullStopLossRatio: number;
+} {
+  const threshold =
+    params.kind === "advantage"
+      ? Math.max(params.config.advantageMinAbsGap, EPSILON)
+      : Math.max(params.config.reversalMaxAbsGap, EPSILON);
+  const gapScore =
+    params.kind === "advantage"
+      ? clamp(params.absGap / threshold - 1, 0, 2) / 2
+      : clamp(
+          (params.config.reversalMaxAbsGap - params.absGap) / threshold,
+          0,
+          1,
+        );
+  const momentumThreshold =
+    params.kind === "advantage"
+      ? Math.max(params.config.advantageMinMomentum, EPSILON)
+      : Math.max(params.config.reversalMinMomentum, EPSILON);
+  const momentumScore =
+    clamp(params.momentum / momentumThreshold - 1, 0, 2) / 2;
+  const priceScore = clamp(
+    (params.maxPrice - params.price) / params.maxPrice,
+    0,
+    1,
+  );
+  let takeProfitRatio = clamp(
     params.config.minTakeProfitRatio +
       params.config.dynamicTpPriceWeight * priceScore +
       params.config.dynamicTpGapWeight * gapScore +
@@ -379,24 +617,80 @@ function dynamicTakeProfitRatio(params: {
     params.config.minTakeProfitRatio,
     params.config.maxTakeProfitRatio,
   );
+  let halfStopLossRatio = params.config.halfStopLossRatio;
+  let fullStopLossRatio = params.config.fullStopLossRatio;
+  const timing = timingAdjustment(params.elapsed, params.config);
+  if (timing === "early") {
+    takeProfitRatio += params.config.earlyTakeProfitBonus;
+    halfStopLossRatio += params.config.earlyStopLossBonus;
+    fullStopLossRatio += params.config.earlyStopLossBonus;
+  } else if (timing === "late") {
+    takeProfitRatio -= params.config.lateTakeProfitDiscount;
+    halfStopLossRatio -= params.config.lateStopLossDiscount;
+    fullStopLossRatio -= params.config.lateStopLossDiscount;
+  }
+  return {
+    takeProfitRatio: clamp(
+      takeProfitRatio,
+      params.config.minTakeProfitRatio,
+      params.config.maxTakeProfitRatio,
+    ),
+    halfStopLossRatio: clamp(halfStopLossRatio, 0.05, 0.99),
+    fullStopLossRatio: clamp(fullStopLossRatio, 0.05, 0.99),
+  };
+}
+
+function dynamicTakeProfitRatio(params: {
+  kind?: EntryKind;
+  price: number;
+  absGap: number;
+  momentum: number;
+  maxPrice: number;
+  elapsed?: number;
+  config: Config;
+}): number {
+  return dynamicExitPlan({
+    kind: params.kind ?? "advantage",
+    price: params.price,
+    absGap: params.absGap,
+    momentum: params.momentum,
+    maxPrice: params.maxPrice,
+    elapsed: params.elapsed ?? params.config.entryStartElapsedSeconds,
+    config: params.config,
+  }).takeProfitRatio;
 }
 
 function buildEntry(params: {
   ctx: StrategyContext;
+  kind: EntryKind;
   side: Side;
   gap: number;
+  elapsed: number;
   stats: EdgeStats;
+  recentResults?: readonly Side[];
   config: Config;
 }): EntryDecision | null {
-  const maxPrice = params.config.maxAdvantagePrice;
+  const maxPrice =
+    params.kind === "advantage"
+      ? params.config.maxAdvantagePrice
+      : params.config.maxReversalPrice;
   const quality = bookQuality(params.ctx, params.side);
   if (!quality) return null;
   if (quality.ask > maxPrice) return null;
+  if (
+    quality.ask < params.config.minEntryPrice ||
+    quality.ask > params.config.maxEntryPrice
+  ) {
+    return null;
+  }
   if (quality.askLiquidity < params.config.minEntryLiquidityUsd) return null;
-  if (quality.spread === null || quality.spread > params.config.maxSpread) return null;
+  if (quality.spread === null || quality.spread > params.config.maxSpread)
+    return null;
 
   const tokenId =
-    params.side === "UP" ? params.ctx.clobTokenIds[0] : params.ctx.clobTokenIds[1];
+    params.side === "UP"
+      ? params.ctx.clobTokenIds[0]
+      : params.ctx.clobTokenIds[1];
   const price = passiveBuyPrice({
     ask: quality.ask,
     bid: quality.bid,
@@ -411,28 +705,50 @@ function buildEntry(params: {
   const momentum = params.stats.sideVelocityEma[params.side];
   const recentDelta = recentSideDelta(params.side, params.stats.gapHistory);
   const cumulativeSideGap = sideGap(params.side, params.stats.cumulativeGap);
-  if (momentum === null || recentDelta === null || recentDelta <= 0) return null;
+  if (momentum === null || recentDelta === null || recentDelta <= 0)
+    return null;
 
-  if (absGap < params.config.advantageMinAbsGap) return null;
-  if (momentum < params.config.advantageMinMomentum) return null;
-  if (cumulativeSideGap < params.config.advantageMinCumulativeGap) return null;
+  if (params.kind === "advantage") {
+    if (absGap < params.config.advantageMinAbsGap) return null;
+    if (momentum < params.config.advantageMinMomentum) return null;
+    if (cumulativeSideGap < params.config.advantageMinCumulativeGap)
+      return null;
+  } else {
+    if (absGap > params.config.reversalMaxAbsGap) return null;
+    if (momentum < params.config.reversalMinMomentum) return null;
+    if (cumulativeSideGap < params.config.reversalMinCumulativeGap) return null;
+  }
 
-  const takeProfitRatio = dynamicTakeProfitRatio({
+  const resultBias = recentResultBias(
+    params.side,
+    params.recentResults,
+    params.config,
+  );
+  if (resultBias < params.config.recentResultMinBias) return null;
+
+  const exitPlan = dynamicExitPlan({
+    kind: params.kind,
     price,
     absGap,
     momentum,
     maxPrice,
+    elapsed: params.elapsed,
     config: params.config,
   });
-  const takeProfitPrice = roundPrice(Math.min(0.99, price * (1 + takeProfitRatio)));
+  const takeProfitPrice = roundPrice(
+    Math.min(0.99, price * (1 + exitPlan.takeProfitRatio)),
+  );
   const score =
-    takeProfitRatio +
+    exitPlan.takeProfitRatio +
     Math.max(0, maxPrice - price) +
     Math.max(0, momentum) * 0.05 +
-    Math.max(0, cumulativeSideGap) * 0.0005;
+    (params.kind === "advantage"
+      ? Math.max(0, cumulativeSideGap) * 0.0005
+      : 0) +
+    resultBias * params.config.recentResultWeight;
 
   return {
-    kind: "advantage",
+    kind: params.kind,
     side: params.side,
     tokenId,
     ask: quality.ask,
@@ -443,8 +759,11 @@ function buildEntry(params: {
     sideGap: currentSideGap,
     sideMomentum: momentum,
     cumulativeSideGap,
-    takeProfitRatio,
+    takeProfitRatio: exitPlan.takeProfitRatio,
     takeProfitPrice,
+    halfStopLossRatio: exitPlan.halfStopLossRatio,
+    fullStopLossRatio: exitPlan.fullStopLossRatio,
+    recentBias: resultBias,
     score,
   };
 }
@@ -455,24 +774,49 @@ function chooseEntry(params: {
   elapsed: number;
   stats: EdgeStats;
   state: State;
+  recentResults?: readonly Side[];
   config?: Config;
 }): EntryDecision | null {
   const config = params.config ?? CONFIG;
-  if (params.state.entryOrderSubmitted || params.state.pendingEntry) return null;
+  if (params.state.pendingEntry) return null;
   if (params.state.position || params.state.closing) return null;
+  if (params.state.marketLossBlocked) return null;
   if (params.elapsed < config.entryStartElapsedSeconds) return null;
   if (params.elapsed > config.entryEndElapsedSeconds) return null;
   if (params.elapsed >= config.holdOnlyStartElapsedSeconds) return null;
   if (params.gap === 0) return null;
 
-  if (!config.enableAdvantage) return null;
-  return buildEntry({
-    ctx: params.ctx,
-    side: params.gap > 0 ? "UP" : "DOWN",
-    gap: params.gap,
-    stats: params.stats,
-    config,
-  });
+  const gapSide: Side = params.gap > 0 ? "UP" : "DOWN";
+  const candidates: EntryDecision[] = [];
+  if (config.enableAdvantage) {
+    const entry = buildEntry({
+      ctx: params.ctx,
+      kind: "advantage",
+      side: gapSide,
+      gap: params.gap,
+      elapsed: params.elapsed,
+      stats: params.stats,
+      recentResults: params.recentResults,
+      config,
+    });
+    if (entry) candidates.push(entry);
+  }
+  if (config.enableReversal) {
+    const entry = buildEntry({
+      ctx: params.ctx,
+      kind: "reversal",
+      side: opposite(gapSide),
+      gap: params.gap,
+      elapsed: params.elapsed,
+      stats: params.stats,
+      recentResults: params.recentResults,
+      config,
+    });
+    if (entry) candidates.push(entry);
+  }
+
+  if (candidates.length === 0) return null;
+  return candidates.sort((a, b) => b.score - a.score)[0]!;
 }
 
 function chooseExit(params: {
@@ -492,9 +836,11 @@ function chooseExit(params: {
   if (params.bid === null) return null;
   if (params.bidLiquidity < config.minExitLiquidityUsd) return null;
 
-  const profitRatio = (params.bid - params.pos.entryPrice) / params.pos.entryPrice;
+  const profitRatio =
+    (params.bid - params.pos.entryPrice) / params.pos.entryPrice;
   const sideCurrentGap = sideGap(params.pos.side, params.gap);
-  const holdSeconds = ((params.nowMs ?? Date.now()) - params.pos.entryMs) / 1000;
+  const holdSeconds =
+    ((params.nowMs ?? Date.now()) - params.pos.entryMs) / 1000;
   const tick = tickSize(params.ctx, params.pos.tokenId);
   const tpPrice = (minPrice: number) =>
     passiveSellPrice({
@@ -509,7 +855,10 @@ function chooseExit(params: {
     params.elapsed >= config.entryStartElapsedSeconds &&
     params.elapsed <= config.entryEndElapsedSeconds
   ) {
-    if (config.entryTakeProfitEnabled && params.bid >= params.pos.takeProfitPrice) {
+    if (
+      config.entryTakeProfitEnabled &&
+      params.bid >= params.pos.takeProfitPrice
+    ) {
       const price = tpPrice(params.pos.takeProfitPrice);
       if (price === null) return null;
       return {
@@ -531,7 +880,7 @@ function chooseExit(params: {
     sideCurrentGap <= 0
   ) {
     const lossRatio = -profitRatio;
-    if (lossRatio >= config.fullStopLossRatio) {
+    if (lossRatio >= params.pos.fullStopLossRatio) {
       return {
         price: roundPrice(params.bid),
         shares: params.pos.shares,
@@ -542,7 +891,7 @@ function chooseExit(params: {
       };
     }
 
-    if (lossRatio >= config.halfStopLossRatio && !params.pos.halfStopped) {
+    if (lossRatio >= params.pos.halfStopLossRatio && !params.pos.halfStopped) {
       return {
         price: roundPrice(params.bid),
         shares: roundShares(params.pos.shares / 2),
@@ -597,7 +946,8 @@ function chooseExit(params: {
       const costCoverShares = roundShares(
         Math.min(
           params.pos.shares,
-          (params.pos.entryPrice * params.pos.initialShares) / Math.max(params.bid, EPSILON),
+          (params.pos.entryPrice * params.pos.initialShares) /
+            Math.max(params.bid, EPSILON),
         ),
       );
       const price = tpPrice(params.pos.entryPrice);
@@ -612,7 +962,10 @@ function chooseExit(params: {
           holdRestAfterFill: false,
         };
       }
-      if (costCoverShares > EPSILON && costCoverShares < params.pos.shares - EPSILON) {
+      if (
+        costCoverShares > EPSILON &&
+        costCoverShares < params.pos.shares - EPSILON
+      ) {
         return {
           price,
           shares: costCoverShares,
@@ -649,7 +1002,8 @@ function metrics(params: {
   pos?: Position;
   exitReason?: string;
 }): StrategyMetrics {
-  const side = params.entry?.side ?? params.pos?.side ?? (params.gap >= 0 ? "UP" : "DOWN");
+  const side =
+    params.entry?.side ?? params.pos?.side ?? (params.gap >= 0 ? "UP" : "DOWN");
   return {
     strategy: "btc-5m-arb",
     elapsed: Math.round(params.elapsed),
@@ -664,14 +1018,29 @@ function metrics(params: {
         ? null
         : Number(params.stats.sideVelocityEma[side]!.toFixed(4)),
     cumulativeGap: Number(params.stats.cumulativeGap.toFixed(2)),
-    cumulativeSideGap: Number(sideGap(side, params.stats.cumulativeGap).toFixed(2)),
+    cumulativeSideGap: Number(
+      sideGap(side, params.stats.cumulativeGap).toFixed(2),
+    ),
     entryPrice: params.entry?.price ?? params.pos?.entryPrice ?? null,
     entryAsk: params.entry?.ask ?? null,
     takeProfitRatio:
       params.entry?.takeProfitRatio ?? params.pos?.takeProfitRatio ?? null,
-    takeProfitPrice: params.entry?.takeProfitPrice ?? params.pos?.takeProfitPrice ?? null,
+    takeProfitPrice:
+      params.entry?.takeProfitPrice ?? params.pos?.takeProfitPrice ?? null,
+    halfStopLossRatio:
+      params.entry?.halfStopLossRatio ?? params.pos?.halfStopLossRatio ?? null,
+    fullStopLossRatio:
+      params.entry?.fullStopLossRatio ?? params.pos?.fullStopLossRatio ?? null,
+    recentBias: params.entry?.recentBias ?? null,
     exitReason: params.exitReason ?? null,
   };
+}
+
+function updateMarketLossBlock(state: State, config = CONFIG): void {
+  if (config.maxMarketLoss <= 0) return;
+  if (state.realizedPnl <= -config.maxMarketLoss + EPSILON) {
+    state.marketLossBlocked = true;
+  }
 }
 
 function placeSell(params: {
@@ -724,6 +1093,9 @@ function placeSell(params: {
         metrics: sellMetrics,
       },
       onFilled(filledShares) {
+        params.state.realizedPnl +=
+          (params.decision.price - params.pos.entryPrice) * filledShares;
+        updateMarketLossBlock(params.state);
         const remainingShares = roundShares(params.pos.shares - filledShares);
         params.ctx.log(
           `[${params.ctx.slug}] btc-5m-arb: SELL ${params.pos.side} filled @ ${params.decision.price} (${filledShares} shares, ${params.decision.reason})`,
@@ -744,7 +1116,6 @@ function placeSell(params: {
           return;
         }
         params.state.position = null;
-        releaseOnce(params.state, params.release);
       },
       onExpired() {
         params.state.closing = false;
@@ -765,9 +1136,9 @@ function placeSell(params: {
 }
 
 export const btc5mArb: Strategy = async (ctx) => {
-  if (Env.get("PROD")) {
+  if (Env.get("PROD") && !CONFIG.allowProd) {
     ctx.log(
-      "[btc-5m-arb] Strategy is simulation-first. Remove this guard only after fresh replay and small-size paper runs are stable.",
+      "[btc-5m-arb] Strategy is simulation-first. Set B5A_ALLOW_PROD=true only after fresh replay and small-size paper runs are stable.",
       "red",
     );
     process.exit(1);
@@ -781,19 +1152,33 @@ export const btc5mArb: Strategy = async (ctx) => {
   const release = ctx.hold();
   const stats = createEdgeStats();
   const state: State = {
-    entryOrderSubmitted: false,
     pendingEntry: false,
     position: null,
     closing: false,
+    realizedPnl: 0,
+    marketLossBlocked: false,
     released: false,
     settlementHoldLogged: false,
   };
+  let finalResultRecorded = false;
+  let lastGap: number | null = null;
 
   const interval = setInterval(() => {
     const now = Date.now();
     const remaining = Math.floor((ctx.slotEndMs - now) / 1000);
     const elapsed = Math.max(0, (now - ctx.slotStartMs) / 1000);
     if (remaining <= 0) {
+      if (!finalResultRecorded) {
+        const result = ctx.getMarketResult();
+        if (result?.closePrice != null && result?.openPrice != null) {
+          recordRecentMarketResult(
+            result.closePrice > result.openPrice ? "UP" : "DOWN",
+          );
+        } else if (lastGap !== null) {
+          recordRecentMarketResult(lastGap >= 0 ? "UP" : "DOWN");
+        }
+        finalResultRecorded = true;
+      }
       clearInterval(interval);
       releaseOnce(state, release);
       return;
@@ -804,6 +1189,7 @@ export const btc5mArb: Strategy = async (ctx) => {
     if (priceToBeat === null || btcPrice === null) return;
 
     const gap = btcPrice - priceToBeat;
+    lastGap = gap;
     updateStats(stats, btcPrice, gap, now);
 
     const entry = chooseEntry({ ctx, gap, elapsed, stats, state });
@@ -823,7 +1209,6 @@ export const btc5mArb: Strategy = async (ctx) => {
         label: `btc-5m-arb ${entry.kind} entry`,
         metrics: entryMetrics,
       });
-      state.entryOrderSubmitted = true;
       state.pendingEntry = true;
       ctx.log(
         `[${ctx.slug}] btc-5m-arb: signal BUY ${entry.kind} ${entry.side} @ ${entry.price} tp ${entry.takeProfitPrice}`,
@@ -860,6 +1245,8 @@ export const btc5mArb: Strategy = async (ctx) => {
               shares: filledShares,
               takeProfitRatio: entry.takeProfitRatio,
               takeProfitPrice: entry.takeProfitPrice,
+              halfStopLossRatio: entry.halfStopLossRatio,
+              fullStopLossRatio: entry.fullStopLossRatio,
               costCovered: false,
               halfStopped: false,
               holdRestToSettlement: false,
@@ -876,7 +1263,6 @@ export const btc5mArb: Strategy = async (ctx) => {
               `[${ctx.slug}] btc-5m-arb: BUY ${entry.kind} ${entry.side} expired @ ${entry.price}`,
               "yellow",
             );
-            if (!state.position) releaseOnce(state, release);
           },
           onFailed(reason) {
             state.pendingEntry = false;
@@ -884,7 +1270,6 @@ export const btc5mArb: Strategy = async (ctx) => {
               `[${ctx.slug}] btc-5m-arb: BUY ${entry.kind} ${entry.side} failed (${reason})`,
               "red",
             );
-            if (!state.position) releaseOnce(state, release);
           },
         },
       ]);
