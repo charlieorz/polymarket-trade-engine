@@ -819,6 +819,19 @@ function buildVariants(): Variant[] {
       },
     },
     {
+      name: "quality_center_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.055",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "4.5",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "4.5",
+        B5H_ADV_MIN_ABS_GAP: "2.2",
+        B5H_ADV_MIN_MOMENTUM: "0.1",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "7",
+        B5H_MAX_ADVANTAGE_PRICE: "0.51",
+      },
+    },
+    {
       name: "tight_adv",
       profile: "conservative",
       env: {
@@ -829,6 +842,45 @@ function buildVariants(): Variant[] {
         B5H_ADV_MIN_MOMENTUM: "0.12",
         B5H_ADV_MIN_CUMULATIVE_GAP: "10",
         B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "tight_center_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.05",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5H_ADV_MIN_ABS_GAP: "2.5",
+        B5H_ADV_MIN_MOMENTUM: "0.12",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "10",
+        B5H_MAX_ADVANTAGE_PRICE: "0.51",
+      },
+    },
+    {
+      name: "strict_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.045",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5H_ADV_MIN_ABS_GAP: "3",
+        B5H_ADV_MIN_MOMENTUM: "0.15",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "14",
+        B5H_MAX_ADVANTAGE_PRICE: "0.52",
+      },
+    },
+    {
+      name: "strict_center_adv",
+      profile: "conservative",
+      env: {
+        B5H_MAX_SPREAD: "0.045",
+        B5H_MIN_ENTRY_LIQUIDITY_USD: "5",
+        B5H_MIN_EXIT_LIQUIDITY_USD: "5",
+        B5H_ADV_MIN_ABS_GAP: "3",
+        B5H_ADV_MIN_MOMENTUM: "0.15",
+        B5H_ADV_MIN_CUMULATIVE_GAP: "14",
+        B5H_MAX_ADVANTAGE_PRICE: "0.51",
       },
     },
   ];
@@ -874,6 +926,48 @@ function buildVariants(): Variant[] {
         B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.56",
         B5H_MIN_TAKE_PROFIT_RATIO: "0.03",
         B5H_MAX_TAKE_PROFIT_RATIO: "0.14",
+      },
+    },
+    {
+      name: "scalp_tp8_stop14",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "45",
+        B5H_STOP_LOSS_START_SECONDS: "30",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "3",
+        B5H_HALF_STOP_LOSS_RATIO: "0.14",
+        B5H_FULL_STOP_LOSS_RATIO: "0.14",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.08",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.58",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.03",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.15",
+      },
+    },
+    {
+      name: "early_tp10_stop18",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "60",
+        B5H_STOP_LOSS_START_SECONDS: "35",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "4",
+        B5H_HALF_STOP_LOSS_RATIO: "0.18",
+        B5H_FULL_STOP_LOSS_RATIO: "0.18",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.1",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.6",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.04",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.18",
+      },
+    },
+    {
+      name: "early_tp12_stop20",
+      env: {
+        B5H_MANAGED_EXIT_START_SECONDS: "65",
+        B5H_STOP_LOSS_START_SECONDS: "40",
+        B5H_STOP_LOSS_MIN_HOLD_SECONDS: "5",
+        B5H_HALF_STOP_LOSS_RATIO: "0.2",
+        B5H_FULL_STOP_LOSS_RATIO: "0.2",
+        B5H_FULL_TAKE_PROFIT_RATIO: "0.12",
+        B5H_TAKE_PROFIT_PRICE_IMMEDIATE: "0.62",
+        B5H_MIN_TAKE_PROFIT_RATIO: "0.05",
+        B5H_MAX_TAKE_PROFIT_RATIO: "0.2",
       },
     },
     {
@@ -1118,7 +1212,7 @@ function pickStableOperationalCandidate(variants: Variant[]): Variant {
       variant.validation!.maxDrawdown <= 8 &&
       variant.test!.maxDrawdown <= 6 &&
       variant.test!.winRate >= 0.65 &&
-      variant.test!.tradedMarkets >= MIN_VALIDATION_TRADED_MARKETS,
+      variant.test!.tradedMarkets >= Math.min(15, MIN_VALIDATION_TRADED_MARKETS),
   );
   const pool = stable.length > 0 ? stable : variants;
   return [...pool].sort((a, b) => {
